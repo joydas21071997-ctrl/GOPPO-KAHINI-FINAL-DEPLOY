@@ -10,7 +10,9 @@ import {
   Ticket,
 } from 'lucide-react';
 import { onIdTokenChanged, signOut } from 'firebase/auth';
-import { auth, isFirebaseConfigured } from './firebase';
+import { auth, db, isFirebaseConfigured } from './firebase';
+import { collection, getDocs } from 'firebase/firestore';
+import { INITIAL_STORIES, INITIAL_CATEGORIES, NPASS_MONTHLY_PRICE_INR } from '../server/catalogSeed';
 import { syncPlaybackProgressToFirestore } from './services/firestoreService';
 import type {
   BootstrapPayload,
@@ -199,37 +201,74 @@ export default function App() {
     const bootstrap = async () => {
       setLoading(true);
       setLoadError(null);
+
+      let storiesData = [...INITIAL_STORIES];
+      let categoriesData: CategoryConfig[] = INITIAL_CATEGORIES.map((c) => ({
+        id: c.id,
+        enabledByAdmin: c.enabledByAdmin,
+        publishedCountBn: INITIAL_STORIES.filter((s) => s.category === c.id && s.language === 'bn' && s.publicationStatus === 'published').length,
+        publishedCountHi: INITIAL_STORIES.filter((s) => s.category === c.id && s.language === 'hi' && s.publicationStatus === 'published').length,
+      }));
+      let nPassPrice = NPASS_MONTHLY_PRICE_INR;
+      let fetchedUser: UserProfile | null = null;
+      let fetchedOrders: OrderRecord[] = [];
+      let fetchedProgress: PlaybackProgress[] = [];
+
       try {
         const res = await fetch('/api/bootstrap', {
           headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
         });
-        if (!res.ok) throw new Error('Failed to load platform data');
-        const data = (await res.json()) as BootstrapPayload;
-        if (cancelled) return;
-        setStories(data.stories);
-        setCategories(data.categories);
-        setNPassPriceInr(data.nPassMonthlyPriceInr || 9);
-        setUser(data.user);
-        setOrders(data.orders || []);
-        setProgress(data.progress || []);
-
-        // Match deep-linked story language if opened directly via ?story=<id>
-        if (typeof window !== 'undefined') {
-          const deepId = new URLSearchParams(window.location.search).get('story');
-          if (deepId) {
-            const found = data.stories.find((s) => s.id === deepId);
-            if (found) {
-              setLanguage(found.language);
-            }
-          }
+        if (res.ok) {
+          const data = (await res.json()) as BootstrapPayload;
+          if (data.stories && data.stories.length > 0) storiesData = data.stories;
+          if (data.categories) categoriesData = data.categories;
+          if (data.nPassMonthlyPriceInr) nPassPrice = data.nPassMonthlyPriceInr;
+          fetchedUser = data.user || null;
+          fetchedOrders = data.orders || [];
+          fetchedProgress = data.progress || [];
+        } else {
+          throw new Error('API fetch failed');
         }
       } catch {
-        if (!cancelled) {
-          setLoadError('Unable to load Goppo Kahini catalog. Please refresh.');
+        // Fallback for static Firebase Hosting deployment where Express server is not running:
+        if (isFirebaseConfigured && db) {
+          try {
+            const snap = await getDocs(collection(db, 'stories'));
+            if (!snap.empty) {
+              const cloudStories: StoryItem[] = [];
+              snap.forEach((docSnap) => {
+                const d = docSnap.data() as StoryItem;
+                if (d && d.id && d.title) cloudStories.push(d);
+              });
+              if (cloudStories.length > 0) {
+                storiesData = cloudStories;
+              }
+            }
+          } catch {
+            // Keep INITIAL_STORIES fallback
+          }
         }
-      } finally {
-        if (!cancelled) setLoading(false);
       }
+
+      if (cancelled) return;
+      setStories(storiesData);
+      setCategories(categoriesData);
+      setNPassPriceInr(nPassPrice);
+      setUser(fetchedUser);
+      setOrders(fetchedOrders);
+      setProgress(fetchedProgress);
+
+      // Match deep-linked story language if opened directly via ?story=<id>
+      if (typeof window !== 'undefined') {
+        const deepId = new URLSearchParams(window.location.search).get('story');
+        if (deepId) {
+          const found = storiesData.find((s) => s.id === deepId);
+          if (found) {
+            setLanguage(found.language);
+          }
+        }
+      }
+      setLoading(false);
     };
     bootstrap();
     return () => {
