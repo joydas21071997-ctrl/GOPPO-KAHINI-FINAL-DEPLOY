@@ -1,0 +1,17 @@
+{
+  "name": "গল্পকাহিনি — Goppo Kahini Audio Stories & Films",
+  "short_name": "Goppo Kahini",
+  "description": "Bengali & Hindi Audio Stories, Animation & Films",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09080B",
+  "theme_color": "#1F0B0B",
+  "icons": [
+    {
+      "src": "/assets/aistudio/Glossy_Red_Infinity_Ribbon_Logo_2028e914.png",
+      "sizes": "192x192 512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
