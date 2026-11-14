@@ -38,12 +38,14 @@ import {
 } from 'firebase/auth';
 import {
   auth,
+  db,
   getFirebasePublicMeta,
   googleProvider,
   isFirebaseConfigured,
   isFirebaseStorageConfigured,
   uploadMediaFileToFirebaseStorage,
 } from '../firebase';
+import { collection, getDocs, doc, getDoc } from 'firebase/firestore';
 import {
   deleteEditorFromFirestore,
   deleteStoryFromFirestore,
@@ -255,10 +257,9 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
 
   // Load catalog overview for verified Admin or Editor
   const fetchOverview = async (token = authToken) => {
-    if (!token) return;
     try {
       const res = await fetch('/api/admin/overview', {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (res.ok) {
         const data = await res.json();
@@ -267,9 +268,34 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
         setAllUsers(data.users || []);
         setAllEditors(data.editors || []);
         if (data.nPassPriceInr) setCustomNPassPrice(data.nPassPriceInr);
+        return;
       }
     } catch {
-      // Non-blocking
+      // Non-blocking catch
+    }
+
+    // Direct Firestore fallback for static Firebase Hosting deployments
+    if (db) {
+      try {
+        const storiesSnap = await getDocs(collection(db, 'stories'));
+        const loadedStories: StoryItem[] = [];
+        storiesSnap.forEach((d) => loadedStories.push(d.data() as StoryItem));
+        if (loadedStories.length > 0) {
+          setStories(loadedStories);
+        }
+
+        const editorsSnap = await getDocs(collection(db, 'editors'));
+        const loadedEditors: EditorGrant[] = [];
+        editorsSnap.forEach((d) => loadedEditors.push(d.data() as EditorGrant));
+        setAllEditors(loadedEditors);
+
+        const settingsSnap = await getDoc(doc(db, 'settings', 'platform'));
+        if (settingsSnap.exists() && settingsSnap.data().nPassMonthlyPriceInr) {
+          setCustomNPassPrice(settingsSnap.data().nPassMonthlyPriceInr);
+        }
+      } catch {
+        // Non-blocking
+      }
     }
   };
 
@@ -288,21 +314,65 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
   }, [statusBanner]);
 
   const exchangeFirebaseTokenForStudio = async (idToken: string) => {
-    const authRes = await fetch('/api/auth/firebase', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${idToken}`,
-      },
-      body: JSON.stringify({}),
-    });
-    const authData = await authRes.json();
-    if (!authRes.ok) {
-      setAuthError(authData.error || 'Firebase প্রমাণীকরণ ব্যর্থ হয়েছে।');
+    let verifiedUser: UserProfile | null = null;
+
+    try {
+      const authRes = await fetch('/api/auth/firebase', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({}),
+      });
+      if (authRes.ok) {
+        const authData = await authRes.json();
+        verifiedUser = authData.user as UserProfile;
+      }
+    } catch {
+      // Fall through to direct Firestore verification
+    }
+
+    if (!verifiedUser && auth?.currentUser) {
+      const fbUser = auth.currentUser;
+      const email = (fbUser.email || '').toLowerCase();
+      const isOwner = email === 'joydas.21071997@gmail.com';
+
+      let isAdmin = isOwner;
+      if (!isAdmin && db) {
+        try {
+          const adminSnap = await getDoc(doc(db, 'admins', fbUser.uid));
+          isAdmin = adminSnap.exists();
+        } catch {
+          // ignore
+        }
+      }
+
+      verifiedUser = {
+        id: `usr_${fbUser.uid.slice(0, 10)}`,
+        firebaseUid: fbUser.uid,
+        name: fbUser.displayName || email.split('@')[0] || 'Admin',
+        email: fbUser.email || '',
+        role: isAdmin ? 'admin' : 'listener',
+        permissions: isAdmin ? [
+          'manage_stories',
+          'manage_media',
+          'manage_hero',
+          'translate_stories',
+          'manage_categories',
+        ] : undefined,
+        preferredLanguage: 'bn',
+        purchasedStoryIds: [],
+        storyEntitlements: {},
+        membership: { planId: 'npass_monthly_9', priceInr: 9, status: 'INACTIVE' },
+      };
+    }
+
+    if (!verifiedUser) {
+      setAuthError('প্রমাণীকরণ ব্যর্থ হয়েছে।');
       return;
     }
 
-    const verifiedUser = authData.user as UserProfile;
     const isStaff =
       verifiedUser.role === 'admin' ||
       (verifiedUser.role === 'editor' && (verifiedUser.permissions?.length || 0) > 0);
@@ -314,23 +384,14 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       return;
     }
 
-    const overviewRes = await fetch('/api/admin/overview', {
-      headers: { Authorization: `Bearer ${idToken}` },
-    });
-    const overviewData = overviewRes.ok ? await overviewRes.json() : {};
-
-    setStories(overviewData.stories || []);
-    setAllOrders(overviewData.orders || []);
-    setAllUsers(overviewData.users || []);
-    setAllEditors(overviewData.editors || []);
-    if (overviewData.nPassPriceInr) setCustomNPassPrice(overviewData.nPassPriceInr);
+    await fetchOverview(idToken);
 
     if (onAdminLoginSuccess) {
       onAdminLoginSuccess({
         token: idToken,
         user: verifiedUser,
-        stories: overviewData.stories || [],
-        categories: overviewData.categories || categories,
+        stories: stories,
+        categories: categories,
       });
     }
     setStatusBanner(
