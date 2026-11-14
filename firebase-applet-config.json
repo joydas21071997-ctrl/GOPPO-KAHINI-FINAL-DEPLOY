@@ -1,0 +1,12 @@
+{
+  "projectId": "goppo-kahini",
+  "appId": "1:147448265622:web:7bfca58d455a084e67bbb7",
+  "apiKey": "AIzaSyBAAj19M4vQ-aXnvVVuVqroCSKC2j3lsRA",
+  "authDomain": "goppo-kahini.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-goppokahini-8fc50751-41fa-4471-951d-a2defd71fdfb",
+  "storageBucket": "goppo-kahini.firebasestorage.app",
+  "messagingSenderId": "147448265622",
+  "measurementId": "",
+  "oAuthClientId": "147448265622-3oia3bc7q3i43r0rru5almdmr2a3627o.apps.googleusercontent.com",
+  "recaptchaSiteKey": ""
+}

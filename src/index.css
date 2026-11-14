@@ -1,0 +1,83 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --bg-canvas: #1F0B0B;
+    --bg-surface: #330F0F;
+    --bg-surface-elevated: #4A1717;
+    --border-subtle: rgba(239, 68, 68, 0.2);
+    --border-red-subtle: rgba(239, 68, 68, 0.4);
+    --accent-red: #EF4444;
+    --accent-red-light: #F87171;
+    --text-ivory: #F5F2EB;
+    --text-muted: #D1C5C5;
+  }
+
+  html {
+    background-color: #09080B;
+    color: #F5F2EB;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: "Plus Jakarta Sans", "Noto Sans Bengali", "Noto Sans Devanagari", sans-serif;
+    line-height: 1.6;
+    letter-spacing: 0.01em;
+    overflow-x: hidden;
+    background-color: #1F0B0B;
+    /* Cinematic abstract red/blue gradient wallpaper */
+    background-image: url('/assets/aistudio/abstract-gradient-background-red-suitable-for-wallpaper-design-banner-poster-and-etc-free-photo_9f893c96.jpg');
+    background-size: cover;
+    background-position: center;
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+  }
+}
+
+.font-display-brand {
+  font-family: "Cormorant Garamond", "Noto Serif Bengali", "Noto Serif Devanagari", Georgia, serif;
+}
+
+.font-editorial {
+  font-family: "Noto Serif Bengali", "Noto Serif Devanagari", "Cormorant Garamond", Georgia, serif;
+}
+
+.font-mono-num {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Subtle luxury crimson red gradient text */
+.text-gold-gradient,
+.text-red-gradient {
+  background: linear-gradient(135deg, #FECACA 0%, #EF4444 50%, #B91C1C 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Glass panel utility */
+.glass-panel {
+  background: linear-gradient(180deg, rgba(22, 19, 26, 0.75) 0%, rgba(14, 12, 17, 0.85) 100%);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Hide horizontal scrollbar cleanly on touch carousels while keeping scrollability */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

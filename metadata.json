@@ -1,0 +1,6 @@
+{
+  "name": "Goppo Kahini",
+  "description": "Premium Bengali and Hindi audio storytelling platform featuring original mystery series, per-story ticketing, and N Pass membership.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

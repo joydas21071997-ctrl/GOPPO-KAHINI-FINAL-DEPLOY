@@ -1,0 +1,509 @@
+{
+  "entities": {
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized Owner/Admin account record provisioned outside client source code.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the owner/admin",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified email address of the owner/admin",
+          "maxLength": 254
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin"],
+          "description": "Owner/Admin role"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation"
+        }
+      },
+      "required": ["uid", "email", "role", "createdAt"]
+    },
+    "EditorUser": {
+      "title": "EditorUser",
+      "description": "Delegated Editor account with explicitly granted content permissions.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the editor",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified email address of the editor",
+          "maxLength": 254
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the editor",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "enum": ["editor"],
+          "description": "Editor role"
+        },
+        "permissions": {
+          "type": "array",
+          "description": "Explicitly granted editor permission keys"
+        },
+        "grantedBy": {
+          "type": "string",
+          "description": "UID of the admin who granted access",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last permission update"
+        }
+      },
+      "required": ["uid", "email", "name", "role", "permissions", "grantedBy", "updatedAt"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Listener account profile isolated to owner and admin read access.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Listener display name",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "preferredLanguage": {
+          "type": "string",
+          "enum": ["bn", "hi"],
+          "description": "Preferred UI language"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp"
+        }
+      },
+      "required": ["uid", "name", "preferredLanguage", "createdAt", "updatedAt"]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Isolated PII document for user email address.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 254
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "updatedAt"]
+    },
+    "UserStoryEntitlement": {
+      "title": "UserStoryEntitlement",
+      "description": "Server-authoritative 2-full-listen ticket entitlement per paid story.",
+      "type": "object",
+      "properties": {
+        "storyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "remainingListens": {
+          "type": "number",
+          "description": "Remaining full listens (initialized to 2 per Rs 9 ticket)"
+        },
+        "totalListensUsed": {
+          "type": "number"
+        },
+        "completedEpisodeIdsInCycle": {
+          "type": "array",
+          "description": "Episode IDs completed in the current listen cycle"
+        },
+        "lastOrderId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["storyId", "userId", "remainingListens", "totalListensUsed", "updatedAt"]
+    },
+    "UserProgress": {
+      "title": "UserProgress",
+      "description": "Synchronized playback resume point for an authenticated listener.",
+      "type": "object",
+      "properties": {
+        "storyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "episodeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "isTrailer": {
+          "type": "boolean"
+        },
+        "positionSeconds": {
+          "type": "number"
+        },
+        "durationSeconds": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["storyId", "episodeId", "isTrailer", "positionSeconds", "durationSeconds", "updatedAt"]
+    },
+    "StoryCatalogItem": {
+      "title": "StoryCatalogItem",
+      "description": "Published or draft bilingual story, animation, or short film catalog item.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["bn", "hi"]
+        },
+        "category": {
+          "type": "string",
+          "enum": ["audio", "animation", "films"]
+        },
+        "mediaType": {
+          "type": "string",
+          "enum": ["audio", "video"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "subtitle": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "synopsis": {
+          "type": "string",
+          "maxLength": 3000
+        },
+        "writer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "narrator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "genre": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "coverArt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "heroArt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "trailerTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 220
+        },
+        "trailerDurationLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "trailerDurationSeconds": {
+          "type": "number"
+        },
+        "trailerAudioKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "trailerAudioUrl": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "trailerVideoUrl": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "totalDurationLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "ticketPriceInr": {
+          "type": "number"
+        },
+        "accessPolicy": {
+          "type": "string",
+          "enum": ["ticket_only", "npass_included", "both"]
+        },
+        "publicationStatus": {
+          "type": "string",
+          "enum": ["published", "draft"]
+        },
+        "isFeaturedHero": {
+          "type": "boolean"
+        },
+        "releaseYear": {
+          "type": "number"
+        },
+        "collections": {
+          "type": "array",
+          "description": "Collection tags for catalog indexing"
+        },
+        "episodes": {
+          "type": "array",
+          "description": "Ordered episodes for the story"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "language",
+        "category",
+        "title",
+        "genre",
+        "coverArt",
+        "heroArt",
+        "ticketPriceInr",
+        "accessPolicy",
+        "publicationStatus",
+        "episodes",
+        "updatedAt"
+      ]
+    },
+    "CategorySetting": {
+      "title": "CategorySetting",
+      "description": "Global visibility configuration per content category.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": ["audio", "animation", "films"]
+        },
+        "enabledByAdmin": {
+          "type": "boolean"
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "enabledByAdmin", "updatedBy", "updatedAt"]
+    },
+    "OrderTransaction": {
+      "title": "OrderTransaction",
+      "description": "Individual Rs 9 ticket purchase transaction record.",
+      "type": "object",
+      "properties": {
+        "orderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "itemType": {
+          "type": "string",
+          "enum": ["story_ticket", "npass_monthly"]
+        },
+        "storyId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "itemTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 220
+        },
+        "language": {
+          "type": "string",
+          "enum": ["bn", "hi"]
+        },
+        "amountInr": {
+          "type": "number"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["upi", "card", "netbanking"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "VERIFIED", "FAILED"]
+        },
+        "isSandboxVerification": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "verifiedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["orderId", "userId", "itemType", "itemTitle", "language", "amountInr", "paymentMethod", "status", "createdAt"]
+    },
+    "PlatformSetting": {
+      "title": "PlatformSetting",
+      "description": "Administrative platform settings modifiable only by Owner/Admin.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "nPassMonthlyPriceInr": {
+          "type": "number"
+        },
+        "defaultTicketPriceInr": {
+          "type": "number"
+        },
+        "maxListensPerPurchase": {
+          "type": "number"
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["key", "updatedBy", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Owner/Admin registry provisioned outside client source code."
+    },
+    "/editors/{userId}": {
+      "schema": { "$ref": "#/entities/EditorUser" },
+      "description": "Editor permission grants managed exclusively by Owner/Admin."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "Listener profile document."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Isolated user PII subcollection."
+    },
+    "/users/{userId}/entitlements/{storyId}": {
+      "schema": { "$ref": "#/entities/UserStoryEntitlement" },
+      "description": "2-listen paid ticket entitlements per user and story."
+    },
+    "/users/{userId}/progress/{progressId}": {
+      "schema": { "$ref": "#/entities/UserProgress" },
+      "description": "Playback progress tracking per user and episode."
+    },
+    "/stories/{storyId}": {
+      "schema": { "$ref": "#/entities/StoryCatalogItem" },
+      "description": "Full bilingual audio stories, animation series, and short films catalog."
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/CategorySetting" },
+      "description": "Category enable/disable toggles."
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/OrderTransaction" },
+      "description": "Ticket order and verification ledger."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/PlatformSetting" },
+      "description": "Admin-only platform configuration documents."
+    }
+  }
+}

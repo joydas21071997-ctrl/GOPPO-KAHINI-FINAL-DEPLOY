@@ -1,0 +1,314 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: default deny everything
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'joydas.21071997@gmail.com';
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        isBootstrappedAdmin() ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function hasEditorPermission(perm) {
+      return isVerifiedUser() &&
+        exists(/databases/$(database)/documents/editors/$(request.auth.uid)) &&
+        perm in get(/databases/$(database)/documents/editors/$(request.auth.uid)).data.permissions;
+    }
+
+    function isValidAdminUser(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'role', 'createdAt']) &&
+        data.uid == userId &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.email == request.auth.token.email &&
+        data.role == 'admin' &&
+        data.createdAt == request.time;
+    }
+
+    function isValidEditor(data) {
+      return data.keys().hasAll(['uid', 'email', 'name', 'role', 'permissions', 'grantedBy', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'name', 'role', 'permissions', 'grantedBy', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.role == 'editor' &&
+        data.permissions is list && data.permissions.size() >= 1 && data.permissions.size() <= 10 &&
+        data.permissions[0] is string &&
+        data.permissions.hasOnly(['manage_stories', 'manage_media', 'manage_hero', 'translate_stories', 'manage_categories']) &&
+        data.grantedBy == request.auth.uid &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidUserAccount(data, userId) {
+      return data.keys().hasAll(['uid', 'name', 'preferredLanguage', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'name', 'preferredLanguage', 'createdAt', 'updatedAt']) &&
+        data.uid == userId &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        (data.preferredLanguage == 'bn' || data.preferredLanguage == 'hi') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateInfo(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'updatedAt']) &&
+        data.uid == userId &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidUserEntitlement(data, storyId, userId) {
+      return data.keys().hasAll(['storyId', 'userId', 'remainingListens', 'totalListensUsed', 'updatedAt']) &&
+        data.keys().hasOnly(['storyId', 'userId', 'remainingListens', 'totalListensUsed', 'completedEpisodeIdsInCycle', 'lastOrderId', 'updatedAt']) &&
+        data.storyId == storyId &&
+        data.userId == userId &&
+        data.remainingListens is number && data.remainingListens >= 0 && data.remainingListens <= 100 &&
+        data.totalListensUsed is number && data.totalListensUsed >= 0 && data.totalListensUsed <= 1000 &&
+        (!('completedEpisodeIdsInCycle' in data) || (data.completedEpisodeIdsInCycle is list && data.completedEpisodeIdsInCycle.size() <= 100)) &&
+        (!('lastOrderId' in data) || (data.lastOrderId is string && data.lastOrderId.size() <= 64)) &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidUserProgress(data) {
+      return data.keys().hasAll(['storyId', 'episodeId', 'isTrailer', 'positionSeconds', 'durationSeconds', 'updatedAt']) &&
+        data.keys().hasOnly(['storyId', 'episodeId', 'isTrailer', 'positionSeconds', 'durationSeconds', 'updatedAt']) &&
+        data.storyId is string && data.storyId.size() >= 1 && data.storyId.size() <= 128 && data.storyId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.episodeId is string && data.episodeId.size() >= 1 && data.episodeId.size() <= 128 && data.episodeId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.isTrailer is bool &&
+        data.positionSeconds is number && data.positionSeconds >= 0 && data.positionSeconds <= 86400 &&
+        data.durationSeconds is number && data.durationSeconds >= 1 && data.durationSeconds <= 86400 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidStoryCatalogItem(data, storyId) {
+      return data.keys().hasAll(['id', 'language', 'category', 'title', 'genre', 'coverArt', 'heroArt', 'ticketPriceInr', 'accessPolicy', 'publicationStatus', 'episodes', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'language', 'category', 'mediaType', 'title', 'subtitle', 'synopsis',
+          'writer', 'narrator', 'genre', 'coverArt', 'heroArt', 'trailerTitle',
+          'trailerDurationLabel', 'trailerDurationSeconds', 'trailerAudioKey',
+          'trailerAudioUrl', 'trailerVideoUrl', 'totalDurationLabel', 'ticketPriceInr',
+          'accessPolicy', 'publicationStatus', 'isFeaturedHero', 'releaseYear',
+          'collections', 'episodes', 'updatedAt'
+        ]) &&
+        data.id == storyId &&
+        data.language in ['bn', 'hi'] &&
+        data.category in ['audio', 'animation', 'films'] &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+        data.genre is string && data.genre.size() >= 1 && data.genre.size() <= 100 &&
+        data.coverArt is string && data.coverArt.size() >= 1 && data.coverArt.size() <= 500 &&
+        data.heroArt is string && data.heroArt.size() >= 1 && data.heroArt.size() <= 500 &&
+        data.ticketPriceInr is number && data.ticketPriceInr >= 0 && data.ticketPriceInr <= 50000 &&
+        data.accessPolicy in ['ticket_only', 'npass_included', 'both'] &&
+        data.publicationStatus in ['published', 'draft'] &&
+        data.episodes is list && data.episodes.size() <= 100 &&
+        data.updatedAt == request.time &&
+        (!('mediaType' in data) || data.mediaType in ['audio', 'video']) &&
+        (!('subtitle' in data) || (data.subtitle is string && data.subtitle.size() <= 300)) &&
+        (!('synopsis' in data) || (data.synopsis is string && data.synopsis.size() <= 3000)) &&
+        (!('writer' in data) || (data.writer is string && data.writer.size() >= 1 && data.writer.size() <= 120)) &&
+        (!('narrator' in data) || (data.narrator is string && data.narrator.size() >= 1 && data.narrator.size() <= 120)) &&
+        (!('trailerTitle' in data) || (data.trailerTitle is string && data.trailerTitle.size() >= 1 && data.trailerTitle.size() <= 220)) &&
+        (!('trailerDurationLabel' in data) || (data.trailerDurationLabel is string && data.trailerDurationLabel.size() >= 1 && data.trailerDurationLabel.size() <= 20)) &&
+        (!('trailerDurationSeconds' in data) || (data.trailerDurationSeconds is number && data.trailerDurationSeconds >= 0 && data.trailerDurationSeconds <= 36000)) &&
+        (!('trailerAudioKey' in data) || (data.trailerAudioKey is string && data.trailerAudioKey.size() >= 1 && data.trailerAudioKey.size() <= 140)) &&
+        (!('trailerAudioUrl' in data) || (data.trailerAudioUrl is string && data.trailerAudioUrl.size() <= 1000)) &&
+        (!('trailerVideoUrl' in data) || (data.trailerVideoUrl is string && data.trailerVideoUrl.size() <= 1000)) &&
+        (!('totalDurationLabel' in data) || (data.totalDurationLabel is string && data.totalDurationLabel.size() >= 1 && data.totalDurationLabel.size() <= 30)) &&
+        (!('isFeaturedHero' in data) || data.isFeaturedHero is bool) &&
+        (!('releaseYear' in data) || (data.releaseYear is number && data.releaseYear >= 1900 && data.releaseYear <= 2100)) &&
+        (!('collections' in data) || (data.collections is list && data.collections.size() <= 10));
+    }
+
+    function isValidCategorySetting(data, categoryId) {
+      return data.keys().hasAll(['id', 'enabledByAdmin', 'updatedBy', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'enabledByAdmin', 'updatedBy', 'updatedAt']) &&
+        data.id == categoryId &&
+        data.id in ['audio', 'animation', 'films'] &&
+        data.enabledByAdmin is bool &&
+        data.updatedBy == request.auth.uid &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidPlatformSetting(data) {
+      return data.keys().hasAll(['key', 'updatedBy', 'updatedAt']) &&
+        data.keys().hasOnly(['key', 'nPassMonthlyPriceInr', 'defaultTicketPriceInr', 'maxListensPerPurchase', 'updatedBy', 'updatedAt']) &&
+        data.key is string && data.key.size() >= 1 && data.key.size() <= 64 &&
+        (!('nPassMonthlyPriceInr' in data) || (data.nPassMonthlyPriceInr is number && data.nPassMonthlyPriceInr >= 1 && data.nPassMonthlyPriceInr <= 50000)) &&
+        (!('defaultTicketPriceInr' in data) || (data.defaultTicketPriceInr is number && data.defaultTicketPriceInr >= 0 && data.defaultTicketPriceInr <= 50000)) &&
+        (!('maxListensPerPurchase' in data) || (data.maxListensPerPurchase is number && data.maxListensPerPurchase >= 1 && data.maxListensPerPurchase <= 100)) &&
+        data.updatedBy == request.auth.uid &&
+        data.updatedAt == request.time;
+    }
+
+    // Owner/Admin registry: read by own admin or other admins; only bootstrapped verified owner can register own doc once
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId) && isOwner(userId) && isBootstrappedAdmin() && isValidAdminUser(incoming(), userId);
+      allow update, delete: if false;
+    }
+
+    // Delegated Editors: managed exclusively by verified Owner/Admin; editors can read their own grant doc
+    match /editors/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId) && isAdmin() && isValidEditor(incoming()) && incoming().uid == userId;
+      allow update: if isValidId(userId) && isAdmin() && isValidEditor(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'permissions', 'grantedBy', 'updatedAt']);
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // Listener Profile & User Subcollections (no RBAC role/privilege fields allowed in profile)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId) && isVerifiedUser() && isOwner(userId) &&
+        isValidUserAccount(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isVerifiedUser() &&
+        isValidUserAccount(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'preferredLanguage', 'updatedAt']))
+        );
+      allow delete: if isValidId(userId) && isAdmin();
+
+      match /private/{docId} {
+        allow get: if isValidId(userId) && isValidId(docId) && (isOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow create: if isValidId(userId) && isValidId(docId) && isVerifiedUser() && isOwner(userId) &&
+          isValidUserPrivateInfo(incoming(), userId);
+        allow update: if isValidId(userId) && isValidId(docId) && isVerifiedUser() &&
+          isValidUserPrivateInfo(incoming(), userId) &&
+          incoming().uid == existing().uid && (
+            isAdmin() ||
+            (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']))
+          );
+        allow delete: if isValidId(userId) && isValidId(docId) && isAdmin();
+      }
+
+      // Server-authoritative 2-listen entitlements: client can read own entitlements; only server/Admin writes
+      match /entitlements/{storyId} {
+        allow get: if isValidId(userId) && isValidId(storyId) && (isOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow create: if isValidId(userId) && isValidId(storyId) && isAdmin() && isValidUserEntitlement(incoming(), storyId, userId);
+        allow update: if isValidId(userId) && isValidId(storyId) && isAdmin() && isValidUserEntitlement(incoming(), storyId, userId) &&
+          incoming().storyId == existing().storyId &&
+          incoming().userId == existing().userId;
+        allow delete: if isValidId(userId) && isValidId(storyId) && isAdmin();
+      }
+
+      // Playback resume points: owner and admin can read and sync playback position
+      match /progress/{progressId} {
+        allow get: if isValidId(userId) && isValidId(progressId) && (isOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow create: if isValidId(userId) && isValidId(progressId) && isVerifiedUser() && (isOwner(userId) || isAdmin()) &&
+          isValidUserProgress(incoming());
+        allow update: if isValidId(userId) && isValidId(progressId) && isVerifiedUser() &&
+          isValidUserProgress(incoming()) &&
+          incoming().storyId == existing().storyId &&
+          incoming().episodeId == existing().episodeId && (
+            isAdmin() ||
+            (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['isTrailer', 'positionSeconds', 'durationSeconds', 'updatedAt']))
+          );
+        allow delete: if isValidId(userId) && isValidId(progressId) && (isOwner(userId) || isAdmin());
+      }
+    }
+
+    // Story Catalog (Published items readable by all; drafts & mutations restricted to Admin / manage_stories Editor)
+    match /stories/{storyId} {
+      allow get: if isValidId(storyId) && (existing().publicationStatus == 'published' || isAdmin() || hasEditorPermission('manage_stories'));
+      allow list: if resource.data.publicationStatus == 'published' || isAdmin();
+      allow create: if isValidId(storyId) && (isAdmin() || hasEditorPermission('manage_stories')) &&
+        isValidStoryCatalogItem(incoming(), storyId);
+      allow update: if isValidId(storyId) &&
+        isValidStoryCatalogItem(incoming(), storyId) &&
+        incoming().id == existing().id && (
+          isAdmin() ||
+          (
+            hasEditorPermission('manage_stories') &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'language', 'category', 'mediaType', 'title', 'subtitle', 'synopsis',
+              'writer', 'narrator', 'genre', 'coverArt', 'heroArt', 'trailerTitle',
+              'trailerDurationLabel', 'trailerDurationSeconds', 'trailerAudioKey',
+              'trailerAudioUrl', 'trailerVideoUrl', 'totalDurationLabel', 'ticketPriceInr',
+              'accessPolicy', 'publicationStatus', 'isFeaturedHero', 'releaseYear',
+              'collections', 'episodes', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(storyId) && (isAdmin() || hasEditorPermission('manage_stories'));
+    }
+
+    // Category Visibility Settings
+    match /categories/{categoryId} {
+      allow get: if isValidId(categoryId) && categoryId in ['audio', 'animation', 'films'];
+      allow list: if resource.data.id in ['audio', 'animation', 'films'];
+      allow create: if isValidId(categoryId) && (isAdmin() || hasEditorPermission('manage_categories')) &&
+        isValidCategorySetting(incoming(), categoryId);
+      allow update: if isValidId(categoryId) &&
+        isValidCategorySetting(incoming(), categoryId) &&
+        incoming().id == existing().id && (
+          isAdmin() ||
+          (hasEditorPermission('manage_categories') && incoming().diff(existing()).affectedKeys().hasOnly(['enabledByAdmin', 'updatedBy', 'updatedAt']))
+        );
+      allow delete: if isValidId(categoryId) && isAdmin();
+    }
+
+    // Order Transactions: readable only by the buyer or Owner/Admin; written strictly by server/Admin
+    match /orders/{orderId} {
+      allow get: if isValidId(orderId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow write: if false;
+    }
+
+    // Admin-only platform settings
+    match /settings/{settingId} {
+      allow get: if isValidId(settingId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(settingId) && isAdmin() && isValidPlatformSetting(incoming());
+      allow update: if isValidId(settingId) && isAdmin() && isValidPlatformSetting(incoming()) &&
+        incoming().key == existing().key &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'nPassMonthlyPriceInr', 'defaultTicketPriceInr', 'maxListensPerPurchase', 'updatedBy', 'updatedAt'
+        ]);
+      allow delete: if isValidId(settingId) && isAdmin();
+    }
+  }
+}
