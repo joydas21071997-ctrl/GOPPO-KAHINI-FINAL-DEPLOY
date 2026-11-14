@@ -301,6 +301,10 @@ export default function App() {
   useEffect(() => {
     const isAdFree = user?.membership.status === 'ACTIVE';
     if (isAdFree || !adSettings.enabled) {
+      const existingSocial = document.getElementById('gk-ad-social-bar');
+      if (existingSocial) existingSocial.remove();
+      const existingPopunder = document.getElementById('gk-ad-popunder');
+      if (existingPopunder) existingPopunder.remove();
       return;
     }
 
@@ -309,22 +313,34 @@ export default function App() {
       if (!snippet || document.getElementById(id)) return;
       try {
         const wrapper = document.createElement('div');
-        wrapper.id = id;
         wrapper.innerHTML = snippet;
         const scriptTags = wrapper.getElementsByTagName('script');
-        for (let i = 0; i < scriptTags.length; i++) {
-          const original = scriptTags[i];
-          const fresh = document.createElement('script');
-          fresh.async = true;
-          if (original.src) {
-            fresh.src = original.src;
-          } else {
-            fresh.textContent = original.textContent;
+        if (scriptTags.length > 0) {
+          for (let i = 0; i < scriptTags.length; i++) {
+            const original = scriptTags[i];
+            const fresh = document.createElement('script');
+            fresh.id = i === 0 ? id : `${id}-${i}`;
+            Array.from(original.attributes).forEach((attr) => {
+              if (attr.name !== 'id') {
+                fresh.setAttribute(attr.name, attr.value);
+              }
+            });
+            if (original.src) {
+              fresh.src = original.src;
+            } else if (original.textContent) {
+              fresh.textContent = original.textContent;
+            }
+            document.body.appendChild(fresh);
           }
-          Array.from(original.attributes).forEach((attr) => {
-            if (attr.name !== 'src') fresh.setAttribute(attr.name, attr.value);
-          });
-          document.body.appendChild(fresh);
+        } else {
+          const trimmed = snippet.trim();
+          if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('//')) {
+            const fresh = document.createElement('script');
+            fresh.id = id;
+            fresh.src = trimmed;
+            fresh.async = true;
+            document.body.appendChild(fresh);
+          }
         }
       } catch {
         // Safe failover
@@ -337,6 +353,13 @@ export default function App() {
     if (adSettings.popunderScript) {
       injectRawScriptSnippet('gk-ad-popunder', adSettings.popunderScript);
     }
+
+    return () => {
+      const existingSocial = document.getElementById('gk-ad-social-bar');
+      if (existingSocial) existingSocial.remove();
+      const existingPopunder = document.getElementById('gk-ad-popunder');
+      if (existingPopunder) existingPopunder.remove();
+    };
   }, [adSettings, user]);
 
   const handleLanguageChange = (nextLang: Language) => {
