@@ -152,11 +152,13 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
       setActiveTab('my_stories');
     } catch (err) {
       const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('unauthorized-domain')) {
+      if (msg.includes('auth/popup-closed-by-user') || msg.includes('popup-closed-by-user')) {
+        setAuthError(null);
+      } else if (msg.includes('unauthorized-domain')) {
         setAuthError(
           language === 'bn'
-            ? 'এই ডোমেইনটি Firebase Console → Authentication → Settings → Authorized domains-এ যোগ করা নেই।'
-            : 'यह डोमेन Firebase Console के Authorized domains में जोड़ा नहीं गया है।',
+            ? 'এই ডোমেইনটি অথেন্টিকেশন সেটিংসে অনুমোদিত নয়।'
+            : 'यह डोमेन अधिकृत नहीं है।',
         );
       } else if (msg.includes('popup-blocked')) {
         setAuthError(
@@ -165,7 +167,11 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
             : 'ब्राउज़र ने साइन-इन पॉप-अप ब्लॉक किया है। कृपया पॉप-अप की अनुमति दें।',
         );
       } else {
-        setAuthError(msg || 'Unable to complete Firebase Google sign-in.');
+        setAuthError(
+          language === 'bn'
+            ? 'গুগল সাইন-ইন সম্পন্ন করা যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।'
+            : 'Google साइन-इन पूर्ण नहीं हो सका। कृपया पुनः प्रयास करें।',
+        );
       }
     } finally {
       setAuthBusy(false);
@@ -735,13 +741,30 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
                         type="button"
                         disabled={authBusy}
                         onClick={handleGoogleFirebaseLogin}
-                        className="w-full py-3 px-4 rounded-xl bg-white/[0.06] hover:bg-white/[0.11] border border-white/[0.14] text-sm font-semibold text-[#F5F2EB] transition-all cursor-pointer disabled:opacity-60 flex items-center justify-center gap-2"
+                        className="w-full py-3 px-4 rounded-xl bg-white hover:bg-gray-50 text-gray-900 border border-gray-200 font-semibold text-sm transition-all shadow-sm cursor-pointer disabled:opacity-60 flex items-center justify-center gap-3"
                       >
-                        <Shield className="h-4 w-4 text-[#EF4444]" />
+                        <svg className="h-5 w-5 shrink-0" viewBox="0 0 24 24">
+                          <path
+                            fill="#4285F4"
+                            d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"
+                          />
+                          <path
+                            fill="#34A853"
+                            d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.19v3.15C3.17 21.3 7.23 24 12 24z"
+                          />
+                          <path
+                            fill="#FBBC05"
+                            d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.19C.43 8.12 0 9.87 0 12s.43 3.88 1.19 5.42l4.09-3.15z"
+                          />
+                          <path
+                            fill="#EA4335"
+                            d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.23 0 3.17 2.7 1.19 6.58l4.09 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
+                          />
+                        </svg>
                         <span>
                           {language === 'bn'
-                            ? 'Google দিয়ে নিরাপদ সাইন ইন (Firebase Auth)'
-                            : 'Google से सुरक्षित साइन इन (Firebase Auth)'}
+                            ? 'Google দিয়ে সাইন ইন করুন'
+                            : 'Google से साइन इन करें'}
                         </span>
                       </button>
 
