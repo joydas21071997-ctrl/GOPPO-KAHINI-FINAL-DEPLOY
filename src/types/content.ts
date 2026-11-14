@@ -152,6 +152,15 @@ export interface UserProfile {
   membership: MembershipRecord;
 }
 
+export interface AdSettings {
+  enabled: boolean;
+  socialBarScript: string;
+  popunderScript: string;
+  smartlinkUrl: string;
+  banner320x50Code: string;
+  banner160x300Code: string;
+}
+
 export interface BootstrapPayload {
   stories: StoryItem[];
   categories: CategoryConfig[];
@@ -160,4 +169,5 @@ export interface BootstrapPayload {
   user: UserProfile | null;
   orders: OrderRecord[];
   progress: PlaybackProgress[];
+  adSettings?: AdSettings;
 }

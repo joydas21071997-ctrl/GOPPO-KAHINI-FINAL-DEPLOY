@@ -25,6 +25,7 @@ import type {
   PlaybackProgress,
   StoryItem,
   UserProfile,
+  AdSettings,
 } from './types/content';
 import { TRANSLATIONS } from './i18n/translations';
 import { Header, type ActiveRoute, type StoryCollectionFilter } from './components/Header';
@@ -121,6 +122,20 @@ export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [progress, setProgress] = useState<PlaybackProgress[]>([]);
+  const [adSettings, setAdSettings] = useState<AdSettings>(() => {
+    try {
+      const saved = localStorage.getItem('goppo_kahini_ads');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return {
+      enabled: false,
+      socialBarScript: '',
+      popunderScript: '',
+      smartlinkUrl: '',
+      banner320x50Code: '',
+      banner160x300Code: '',
+    };
+  });
   const [loading, setLoading] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -226,6 +241,12 @@ export default function App() {
           fetchedUser = data.user || null;
           fetchedOrders = data.orders || [];
           fetchedProgress = data.progress || [];
+          if (data.adSettings) {
+            setAdSettings(data.adSettings);
+            try {
+              localStorage.setItem('goppo_kahini_ads', JSON.stringify(data.adSettings));
+            } catch {}
+          }
         } else {
           throw new Error('API fetch failed');
         }
@@ -275,6 +296,48 @@ export default function App() {
       cancelled = true;
     };
   }, [authToken]);
+
+  // Dynamic Social Bar & Popunder Script Injection for free listener monetization
+  useEffect(() => {
+    const isAdFree = user?.membership.status === 'ACTIVE';
+    if (isAdFree || !adSettings.enabled) {
+      return;
+    }
+
+    // Helper to evaluate and append script tags safely
+    const injectRawScriptSnippet = (id: string, snippet: string) => {
+      if (!snippet || document.getElementById(id)) return;
+      try {
+        const wrapper = document.createElement('div');
+        wrapper.id = id;
+        wrapper.innerHTML = snippet;
+        const scriptTags = wrapper.getElementsByTagName('script');
+        for (let i = 0; i < scriptTags.length; i++) {
+          const original = scriptTags[i];
+          const fresh = document.createElement('script');
+          fresh.async = true;
+          if (original.src) {
+            fresh.src = original.src;
+          } else {
+            fresh.textContent = original.textContent;
+          }
+          Array.from(original.attributes).forEach((attr) => {
+            if (attr.name !== 'src') fresh.setAttribute(attr.name, attr.value);
+          });
+          document.body.appendChild(fresh);
+        }
+      } catch {
+        // Safe failover
+      }
+    };
+
+    if (adSettings.socialBarScript) {
+      injectRawScriptSnippet('gk-ad-social-bar', adSettings.socialBarScript);
+    }
+    if (adSettings.popunderScript) {
+      injectRawScriptSnippet('gk-ad-popunder', adSettings.popunderScript);
+    }
+  }, [adSettings, user]);
 
   const handleLanguageChange = (nextLang: Language) => {
     if (nextLang === language) return;
@@ -757,6 +820,18 @@ export default function App() {
                       <Crown className="h-4 w-4 text-amber-400" />
                       <span>{t.nav.premium}</span>
                     </button>
+
+                    {adSettings?.enabled && adSettings?.smartlinkUrl && user?.membership?.status !== 'ACTIVE' && (
+                      <a
+                        href={adSettings.smartlinkUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-purple-500/20 to-pink-500/20 hover:from-purple-500/30 hover:to-pink-500/30 border border-purple-500/30 text-xs sm:text-sm font-semibold text-pink-300 whitespace-nowrap shrink-0 transition-all shadow-sm"
+                      >
+                        <Sparkles className="h-4 w-4 text-pink-400" />
+                        <span>🔥 বিশেষ অফার</span>
+                      </a>
+                    )}
                   </div>
 
                   <button
@@ -950,7 +1025,11 @@ export default function App() {
                 )}
 
                 {/* Future-Ready Non-Intrusive Ad Boundary (Free Home Section Placement) */}
-                <AdSlotContainer placement="home_between_racks" isAdFreeContent={false} />
+                <AdSlotContainer
+                  placement="home_between_racks"
+                  isAdFreeContent={user?.membership.status === 'ACTIVE'}
+                  adSettings={adSettings}
+                />
 
                 {/* 6. Reserved Empty Slot: Animation Series (Hidden until uploaded from Admin) */}
                 <StoryCarousel
@@ -1124,6 +1203,7 @@ export default function App() {
                   progress={progress}
                   activeTrackId={activeTrackId}
                   isPlaying={isPlaying}
+                  adSettings={adSettings}
                   onBack={() => setActiveRoute({ view: 'home', category: 'audio' })}
                   onPlayTrailer={handlePlayTrailer}
                   onPlayEpisode={(s, ep) => handlePlayEpisode(s, ep, 0)}
@@ -1177,6 +1257,13 @@ export default function App() {
                 user={user}
                 categories={categories}
                 nPassPriceInr={nPassPriceInr}
+                adSettings={adSettings}
+                onAdSettingsUpdated={(updatedAds) => {
+                  setAdSettings(updatedAds);
+                  try {
+                    localStorage.setItem('goppo_kahini_ads', JSON.stringify(updatedAds));
+                  } catch {}
+                }}
                 onCatalogUpdated={(payload) => {
                   setStories(payload.stories);
                   setCategories(payload.categories);
@@ -1314,6 +1401,8 @@ export default function App() {
         t={t}
         canPlayEpisodes={activeTrack ? checkUserStoryAccess(activeTrack.story) : false}
         initialPositionSeconds={resumeSeconds}
+        adSettings={adSettings}
+        isAdFreeUser={user?.membership.status === 'ACTIVE'}
         onSelectEpisode={(s, ep) => handlePlayEpisode(s, ep, 0)}
         onEpisodeComplete={handleEpisodeComplete}
         onPlayingStateChange={setIsPlaying}

@@ -36,6 +36,7 @@ import {
 import type {
   AccessPolicy,
   AdminPermission,
+  AdSettings,
   BootstrapPayload,
   CategoryConfig,
   ContentCategory,
@@ -66,6 +67,7 @@ interface PersistedState {
   progressByUser: Record<string, PlaybackProgress[]>;
   nPassMonthlyPriceInr?: number;
   pricingMigratedTo9?: boolean;
+  adSettings?: AdSettings;
 }
 
 const DATA_DIR = path.resolve(process.cwd(), '.goppo-data');
@@ -94,6 +96,14 @@ function createDefaultState(): PersistedState {
     sessions: {},
     orders: [],
     progressByUser: {},
+    adSettings: {
+      enabled: false,
+      socialBarScript: '',
+      popunderScript: '',
+      smartlinkUrl: '',
+      banner320x50Code: '',
+      banner160x300Code: '',
+    },
   };
 }
 
@@ -433,8 +443,39 @@ async function startServer() {
       user,
       orders: user ? state.orders.filter((o) => o.userId === user.id) : [],
       progress: user ? state.progressByUser[user.id] || [] : [],
+      adSettings: state.adSettings || {
+        enabled: false,
+        socialBarScript: '',
+        popunderScript: '',
+        smartlinkUrl: '',
+        banner320x50Code: '',
+        banner160x300Code: '',
+      },
     };
     res.json(payload);
+  });
+
+  // ---------------------------------------------------------------------------
+  // ADVERTISEMENT SETTINGS MANAGEMENT (Protected: Staff with manage_stories / manage_categories)
+  // ---------------------------------------------------------------------------
+  app.post('/api/admin/ads', async (req: Request, res: Response) => {
+    const user = await resolveAuthenticatedUser(req);
+    if (!hasStaffPermission(user, 'manage_stories') && !hasStaffPermission(user, 'manage_categories')) {
+      res.status(403).json({ error: 'Permission required to update ad settings.' });
+      return;
+    }
+
+    const { enabled, socialBarScript, popunderScript, smartlinkUrl, banner320x50Code, banner160x300Code } = req.body || {};
+    state.adSettings = {
+      enabled: Boolean(enabled),
+      socialBarScript: typeof socialBarScript === 'string' ? socialBarScript.trim() : '',
+      popunderScript: typeof popunderScript === 'string' ? popunderScript.trim() : '',
+      smartlinkUrl: typeof smartlinkUrl === 'string' ? smartlinkUrl.trim() : '',
+      banner320x50Code: typeof banner320x50Code === 'string' ? banner320x50Code.trim() : '',
+      banner160x300Code: typeof banner160x300Code === 'string' ? banner160x300Code.trim() : '',
+    };
+    saveState();
+    res.json({ ok: true, adSettings: state.adSettings });
   });
 
   // ---------------------------------------------------------------------------
@@ -983,6 +1024,14 @@ async function startServer() {
       nPassPriceInr: isOwnerAdmin
         ? state.nPassMonthlyPriceInr || NPASS_MONTHLY_PRICE_INR
         : undefined,
+      adSettings: state.adSettings || {
+        enabled: false,
+        socialBarScript: '',
+        popunderScript: '',
+        smartlinkUrl: '',
+        banner320x50Code: '',
+        banner160x300Code: '',
+      },
     });
   });
 

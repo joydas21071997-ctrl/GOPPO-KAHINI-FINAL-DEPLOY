@@ -12,7 +12,7 @@ import {
 import { ArtworkImage } from './ArtworkImage';
 import { SocialShareModal } from './SocialShareModal';
 import { StoryProgressIndicator } from './StoryProgressIndicator';
-import { AdSlotContainer } from './AdSlotContainer';
+import { AdSlotContainer, type AdSettings } from './AdSlotContainer';
 
 interface StoryDetailsViewProps {
   story: StoryItem;
@@ -21,6 +21,7 @@ interface StoryDetailsViewProps {
   progress?: PlaybackProgress[];
   activeTrackId?: string;
   isPlaying: boolean;
+  adSettings?: AdSettings;
   onBack: () => void;
   onPlayTrailer: (story: StoryItem) => void;
   onPlayEpisode: (story: StoryItem, episode: Episode) => void;
@@ -35,6 +36,7 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
   progress = [],
   activeTrackId,
   isPlaying,
+  adSettings,
   onBack,
   onPlayTrailer,
   onPlayEpisode,
@@ -374,6 +376,7 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
       <AdSlotContainer
         placement="free_story_details"
         isAdFreeContent={isPremium || hasFullAccess}
+        adSettings={adSettings}
       />
 
       {/* Complete Episode Listing */}
@@ -478,6 +481,14 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
             );
           })}
         </div>
+
+        {adSettings?.banner160x300Code && (
+          <AdSlotContainer
+            placement="story_details_sidebar"
+            isAdFreeContent={isPremium || hasFullAccess}
+            adSettings={adSettings}
+          />
+        )}
       </section>
     </div>
   );

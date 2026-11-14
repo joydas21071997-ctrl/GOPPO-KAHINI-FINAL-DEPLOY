@@ -16,7 +16,7 @@ import type { UIStrings } from '../i18n/translations';
 import { resolveArtworkUrl } from '../utils/artworkRegistry';
 import { isPremiumStory } from '../utils/contentClassification';
 import { ArtworkImage } from './ArtworkImage';
-import { AdSlotContainer } from './AdSlotContainer';
+import { AdSlotContainer, type AdSettings } from './AdSlotContainer';
 
 export interface ActiveTrack {
   story: StoryItem;
@@ -30,6 +30,8 @@ interface AudioPlayerProps {
   t: UIStrings;
   canPlayEpisodes: boolean;
   initialPositionSeconds?: number;
+  adSettings?: AdSettings;
+  isAdFreeUser?: boolean;
   onSelectEpisode: (story: StoryItem, episode: Episode) => void;
   onEpisodeComplete?: (story: StoryItem, episode: Episode) => void;
   onPlayingStateChange: (playing: boolean) => void;
@@ -58,6 +60,8 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   t,
   canPlayEpisodes,
   initialPositionSeconds = 0,
+  adSettings,
+  isAdFreeUser = false,
   onSelectEpisode,
   onEpisodeComplete,
   onPlayingStateChange,
@@ -506,7 +510,8 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
               )}
               <AdSlotContainer
                 placement="free_player_banner"
-                isAdFreeContent={!track.isTrailer && isPremiumStory(track.story)}
+                isAdFreeContent={Boolean(isAdFreeUser) || (!track.isTrailer && isPremiumStory(track.story))}
+                adSettings={adSettings}
               />
             </div>
           </div>

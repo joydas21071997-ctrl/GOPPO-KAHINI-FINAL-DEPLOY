@@ -30,6 +30,8 @@ import {
   Volume2,
   Wand2,
   X,
+  Globe,
+  Megaphone,
 } from 'lucide-react';
 import {
   signInWithEmailAndPassword,
@@ -45,7 +47,7 @@ import {
   isFirebaseStorageConfigured,
   uploadMediaFileToFirebaseStorage,
 } from '../firebase';
-import { collection, getDocs, doc, getDoc } from 'firebase/firestore';
+import { collection, getDocs, doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import {
   deleteEditorFromFirestore,
   deleteStoryFromFirestore,
@@ -61,6 +63,7 @@ import {
 import type {
   AccessPolicy,
   AdminPermission,
+  AdSettings,
   CategoryConfig,
   ContentCategory,
   EditorGrant,
@@ -110,6 +113,8 @@ interface AdminStudioViewProps {
   user: UserProfile | null;
   categories: CategoryConfig[];
   nPassPriceInr?: number;
+  adSettings?: AdSettings;
+  onAdSettingsUpdated?: (settings: AdSettings) => void;
   onCatalogUpdated: (payload: {
     stories: StoryItem[];
     categories: CategoryConfig[];
@@ -140,21 +145,41 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
   user,
   categories,
   nPassPriceInr = 9,
+  adSettings,
+  onAdSettingsUpdated,
   onCatalogUpdated,
   onAdminLoginSuccess,
   onAdminLogout,
   onSwitchToLiveSite,
 }) => {
-  // Tabs: 'catalog' | 'create_edit' | 'audio_recorder' | 'platform_settings' | 'firebase_hub' | 'users_orders' | 'editors_rbac'
+  // Tabs: 'catalog' | 'create_edit' | 'audio_recorder' | 'platform_settings' | 'ad_management' | 'firebase_hub' | 'users_orders' | 'editors_rbac'
   const [activeTab, setActiveTab] = useState<
     | 'catalog'
     | 'create_edit'
     | 'audio_recorder'
     | 'platform_settings'
+    | 'ad_management'
     | 'firebase_hub'
     | 'users_orders'
     | 'editors_rbac'
   >('catalog');
+
+  const [adConfig, setAdConfig] = useState<AdSettings>(
+    adSettings || {
+      enabled: false,
+      socialBarScript: '',
+      popunderScript: '',
+      smartlinkUrl: '',
+      banner320x50Code: '',
+      banner160x300Code: '',
+    },
+  );
+
+  useEffect(() => {
+    if (adSettings) {
+      setAdConfig(adSettings);
+    }
+  }, [adSettings]);
 
   const [stories, setStories] = useState<StoryItem[]>([]);
   const [allOrders, setAllOrders] = useState<OrderRecord[]>([]);
@@ -268,6 +293,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
         setAllUsers(data.users || []);
         setAllEditors(data.editors || []);
         if (data.nPassPriceInr) setCustomNPassPrice(data.nPassPriceInr);
+        if (data.adSettings) setAdConfig(data.adSettings);
         return;
       }
     } catch {
@@ -293,9 +319,52 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
         if (settingsSnap.exists() && settingsSnap.data().nPassMonthlyPriceInr) {
           setCustomNPassPrice(settingsSnap.data().nPassMonthlyPriceInr);
         }
+
+        const adsSnap = await getDoc(doc(db, 'settings', 'ads'));
+        if (adsSnap.exists()) {
+          setAdConfig(adsSnap.data() as AdSettings);
+        }
       } catch {
         // Non-blocking
       }
+    }
+  };
+
+  const handleSaveAds = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      if (authToken) {
+        await fetch('/api/admin/ads', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify(adConfig),
+        });
+      }
+      if (db && auth?.currentUser) {
+        try {
+          await setDoc(doc(db, 'settings', 'ads'), {
+            ...adConfig,
+            updatedAt: serverTimestamp(),
+          });
+        } catch {
+          // ignore
+        }
+      }
+      try {
+        localStorage.setItem('goppo_kahini_ads', JSON.stringify(adConfig));
+      } catch {}
+      if (onAdSettingsUpdated) {
+        onAdSettingsUpdated(adConfig);
+      }
+      setStatusBanner('বিজ্ঞাপন ও স্লট সেটিংস সফলভাবে সংরক্ষিত ও লাইভ হয়েছে!');
+    } catch {
+      setStatusBanner('বিজ্ঞাপন সেটিংস সংরক্ষণ করতে ত্রুটি হয়েছে।');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -1273,6 +1342,9 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       : []),
     ...(isOwnerAdmin || hasPermission('manage_categories')
       ? [{ id: 'platform_settings' as const, label: '⚙️ ক্যাটাগরি ও প্ল্যাটফর্ম সেটিংস' }]
+      : []),
+    ...(isOwnerAdmin || hasPermission('manage_categories') || hasPermission('manage_stories')
+      ? [{ id: 'ad_management' as const, label: '📢 বিজ্ঞাপন ও স্লট সেটিংস' }]
       : []),
     ...(isOwnerAdmin
       ? [
@@ -2441,6 +2513,230 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
             </div>
           )}
         </div>
+      )}
+
+      {/* TAB: AD MONETIZATION & SLOTS SETTINGS */}
+      {effectiveTab === 'ad_management' && (isOwnerAdmin || hasPermission('manage_categories') || hasPermission('manage_stories')) && (
+        <form onSubmit={handleSaveAds} className="space-y-6">
+          {/* Header Card */}
+          <div className="p-6 rounded-2xl bg-gradient-to-b from-[#18131B] via-[#120F16] to-[#0A090C] border border-white/[0.08] shadow-xl">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <div className="w-9 h-9 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-center text-[#EF4444]">
+                    <Megaphone className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h2 className="font-editorial text-xl font-bold text-[#F5F2EB]">
+                      বিজ্ঞাপন ও স্লট সেটিংস (Ad Monetization)
+                    </h2>
+                    <p className="text-xs text-[#A69E95]">
+                      সোশ্যাল বার, পপএন্ডার, স্মার্টলিঙ্ক এবং ব্যানার বিজ্ঞাপন কোড পরিচালনা করুন
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Master Switch */}
+              <div className="flex items-center gap-3 p-3 rounded-xl bg-[#0B090E] border border-white/[0.08]">
+                <span className="text-xs font-medium text-[#F5F2EB]">বিজ্ঞাপন প্রদর্শন:</span>
+                <button
+                  type="button"
+                  onClick={() => setAdConfig((prev) => ({ ...prev, enabled: !prev.enabled }))}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    adConfig.enabled
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                      : 'bg-white/[0.06] text-[#A69E95] border border-white/[0.08]'
+                  }`}
+                >
+                  {adConfig.enabled ? (
+                    <>
+                      <ToggleRight className="h-4 w-4 text-emerald-400" />
+                      <span>সক্রিয় (Enabled)</span>
+                    </>
+                  ) : (
+                    <>
+                      <ToggleLeft className="h-4 w-4 text-[#A69E95]" />
+                      <span>নিষ্ক্রিয় (Disabled)</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Ad-Free Listener Protection Notice */}
+            <div className="mt-4 p-3.5 rounded-xl bg-emerald-500/[0.08] border border-emerald-500/20 flex items-start gap-2.5">
+              <Shield className="h-4 w-4 text-emerald-400 mt-0.5 shrink-0" />
+              <div className="text-xs text-emerald-200/90 leading-relaxed">
+                <span className="font-semibold text-emerald-300">প্রিমিয়াম সুরক্ষানীতি:</span> যে সকল শ্রোতা ₹৯ দিয়ে টিকেট কেটেছেন বা সক্রিয় অ্যাক্সেস পেয়েছেন, তাদের জন্য ওয়েবসাইটটি সম্পূর্ণ বিজ্ঞাপনহীন (100% Ad-Free) থাকবে। বিজ্ঞাপন শুধুমাত্র ফ্রি ব্যবহারকারীদের জন্য প্রদর্শিত হবে।
+              </div>
+            </div>
+          </div>
+
+          {/* Ad Formats Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* 1. সোশ্যাল বার (Social Bar) */}
+            <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] via-[#100D14] to-[#09080B] border border-white/[0.08] shadow-xl space-y-3">
+              <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
+                    <Megaphone className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-[#F5F2EB]">১. সোশ্যাল বার (Social Bar)</h3>
+                    <p className="text-[11px] text-[#A69E95]">ইন-পেজ পুশ নোটিফিকেশন বার</p>
+                  </div>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 font-mono-num">
+                  In-Page Push
+                </span>
+              </div>
+              <p className="text-xs text-[#A69E95] leading-relaxed">
+                Adsterra বা অন্যান্য নেটওয়ার্কের সোশ্যাল বার স্ক্রিপ্ট ট্যাগ এখানে পেস্ট করুন। এটি ভিজিটরদের স্ক্রিনের নিচে বা পাশে মসৃণ নোটিফিকেশন আকারে প্রদর্শন করবে।
+              </p>
+              <textarea
+                rows={4}
+                value={adConfig.socialBarScript || ''}
+                onChange={(e) => setAdConfig((prev) => ({ ...prev, socialBarScript: e.target.value }))}
+                placeholder="<script type='text/javascript' src='//...your-social-bar.js'></script>"
+                className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+              />
+            </div>
+
+            {/* 2. পপএন্ডার (Popunder) */}
+            <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] via-[#100D14] to-[#09080B] border border-white/[0.08] shadow-xl space-y-3">
+              <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
+                    <ExternalLink className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-[#F5F2EB]">২. পপএন্ডার (Popunder)</h3>
+                    <p className="text-[11px] text-[#A69E95]">অন-ক্লিক ব্যাকগ্রাউন্ড পপ উইন্ডো</p>
+                  </div>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 font-mono-num">
+                  On-Click Pop
+                </span>
+              </div>
+              <p className="text-xs text-[#A69E95] leading-relaxed">
+                পপএন্ডার স্ক্রিপ্ট কোডটি এখানে পেস্ট করুন। ফ্রি ইউজাররা সাইটে প্রথমবার কোনো স্টোরি বা বাটনে ক্লিক করলে নতুন ব্যাকগ্রাউন্ড ট্যাবে বিজ্ঞাপনটি ওপেন হবে।
+              </p>
+              <textarea
+                rows={4}
+                value={adConfig.popunderScript || ''}
+                onChange={(e) => setAdConfig((prev) => ({ ...prev, popunderScript: e.target.value }))}
+                placeholder="<script type='text/javascript' src='//...your-popunder.js'></script>"
+                className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+              />
+            </div>
+
+            {/* 3. স্মার্টলিঙ্ক (Smartlink URL) */}
+            <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] via-[#100D14] to-[#09080B] border border-white/[0.08] shadow-xl space-y-3">
+              <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                    <Globe className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-[#F5F2EB]">৩. স্মার্টলিঙ্ক (Smartlink)</h3>
+                    <p className="text-[11px] text-[#A69E95]">ডাইরেক্ট রিডাইরেক্ট অফার লিংক</p>
+                  </div>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 font-mono-num">
+                  Direct URL
+                </span>
+              </div>
+              <p className="text-xs text-[#A69E95] leading-relaxed">
+                আপনার স্মার্টলিঙ্ক/ডাইরেক্ট লিংক ইউআরএল দিন। হোমপেজের ক্যাটালগ ফিল্টারের পাশে এবং অডিও পেজে স্পনসরড অফার বাটন হিসেবে প্রদর্শিত হবে।
+              </p>
+              <input
+                type="url"
+                value={adConfig.smartlinkUrl || ''}
+                onChange={(e) => setAdConfig((prev) => ({ ...prev, smartlinkUrl: e.target.value }))}
+                placeholder="https://..."
+                className="w-full h-11 px-3.5 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+              />
+            </div>
+
+            {/* 4. ব্যানার ৩২০x৫০ (Mobile / Desktop Banner 320x50) */}
+            <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] via-[#100D14] to-[#09080B] border border-white/[0.08] shadow-xl space-y-3">
+              <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400">
+                    <Film className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-[#F5F2EB]">৪. ব্যানার ৩২০x৫০ (Banner 320x50)</h3>
+                    <p className="text-[11px] text-[#A69E95]">হোম র‍্যাক, অডিও প্লেয়ার ও স্টোরি ডিটেইলসে</p>
+                  </div>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-red-500/10 text-red-300 border border-red-500/20 font-mono-num">
+                  320x50
+                </span>
+              </div>
+              <p className="text-xs text-[#A69E95] leading-relaxed">
+                ৩২০x৫০ ব্যানার কোড (script / iframe ট্যাগ)। হোমপেজে গল্প ক্যাটাগরির মাঝে, অডিও প্লেয়ারের ওপর এবং স্টোরি ডিটেইলস পেজের এপিসোড সেকশনের উপরে প্রদর্শিত হবে।
+              </p>
+              <textarea
+                rows={4}
+                value={adConfig.banner320x50Code || ''}
+                onChange={(e) => setAdConfig((prev) => ({ ...prev, banner320x50Code: e.target.value }))}
+                placeholder="<!-- 320x50 Banner Code -->"
+                className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+              />
+            </div>
+
+            {/* 5. ব্যানার ১৬০x৩০০ (Vertical Skyscraper Banner 160x300) */}
+            <div className="lg:col-span-2 p-5 rounded-2xl bg-gradient-to-b from-[#16131A] via-[#100D14] to-[#09080B] border border-white/[0.08] shadow-xl space-y-3">
+              <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-teal-500/10 border border-teal-500/20 flex items-center justify-center text-teal-400">
+                    <Film className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-[#F5F2EB]">৫. ব্যানার ১৬০x৩০০ (Vertical Banner 160x300)</h3>
+                    <p className="text-[11px] text-[#A69E95]">সাইড কলাম ও লার্জ স্ক্রিন সাইডবার স্লট</p>
+                  </div>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-teal-500/10 text-teal-300 border border-teal-500/20 font-mono-num">
+                  160x300
+                </span>
+              </div>
+              <p className="text-xs text-[#A69E95] leading-relaxed">
+                ১৬০x৩০০ উল্লম্ব (Skyscraper) ব্যানার কোড। স্টোরি ডিটেইলসের সাইড কলাম বা বড় স্ক্রিনে সাইডবার স্লটে এটি মনোরমভাবে ফিট হয়।
+              </p>
+              <textarea
+                rows={4}
+                value={adConfig.banner160x300Code || ''}
+                onChange={(e) => setAdConfig((prev) => ({ ...prev, banner160x300Code: e.target.value }))}
+                placeholder="<!-- 160x300 Vertical Banner Code -->"
+                className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+              />
+            </div>
+          </div>
+
+          {/* Save Button Bar */}
+          <div className="flex items-center justify-end gap-3 p-4 rounded-2xl bg-[#120F16] border border-white/[0.08]">
+            <button
+              type="submit"
+              disabled={busy}
+              className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-[#DC2626] to-[#EF4444] text-white font-semibold text-sm cursor-pointer shadow-lg shadow-red-950/40 hover:opacity-95 transition-all disabled:opacity-50"
+            >
+              {busy ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  <span>সংরক্ষণ হচ্ছে...</span>
+                </>
+              ) : (
+                <>
+                  <Save className="h-4 w-4" />
+                  <span>বিজ্ঞাপন সেটিংস সংরক্ষণ ও লাইভ করুন</span>
+                </>
+              )}
+            </button>
+          </div>
+        </form>
       )}
 
       {/* TAB: OWNER/ADMIN ONLY EDITOR & RBAC PERMISSION MANAGEMENT */}
