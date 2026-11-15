@@ -11,12 +11,13 @@ import {
 } from 'lucide-react';
 import { onIdTokenChanged, signOut } from 'firebase/auth';
 import { auth, db, isFirebaseConfigured } from './firebase';
-import { collection, doc, getDocFromServer, getDocs, onSnapshot } from 'firebase/firestore';
+import { collection, doc, getDocFromServer, getDocs, onSnapshot, query, where } from 'firebase/firestore';
 import { INITIAL_STORIES, INITIAL_CATEGORIES, NPASS_MONTHLY_PRICE_INR } from '../server/catalogSeed';
 import {
   fetchPublishedAdsFromFirestore,
   syncPlaybackProgressToFirestore,
 } from './services/firestoreService';
+import { resolveArtworkUrl } from './utils/artworkRegistry';
 import type {
   BootstrapPayload,
   CategoryConfig,
@@ -83,8 +84,35 @@ const isAdminUploadedVisual = (story: StoryItem): boolean =>
   !SEED_VISUAL_IDS.has(story.id) ||
   Date.parse(story.updatedAt || '0') > Date.parse('2026-11-05T00:00:00.000Z');
 
+const parseStoryIdFromLocation = (): string | null => {
+  if (typeof window === 'undefined') return null;
+  const pathMatch = window.location.pathname.match(/^\/story\/([^/]+)\/?$/);
+  if (pathMatch?.[1]) {
+    try {
+      return decodeURIComponent(pathMatch[1]);
+    } catch {
+      return pathMatch[1];
+    }
+  }
+  const params = new URLSearchParams(window.location.search);
+  return params.get('story');
+};
+
+const isAutomatedCrawler = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  if (navigator.webdriver) return true;
+  return /googlebot|bingbot|slurp|duckduckbot|baiduspider|yandex|facebot|twitterbot|whatsapp|telegrambot|crawler|spider|lighthouse/i.test(
+    navigator.userAgent || '',
+  );
+};
+
 export default function App() {
   const [language, setLanguage] = useState<Language>(() => {
+    const deepId = parseStoryIdFromLocation();
+    if (deepId) {
+      const matched = INITIAL_STORIES.find((s) => s.id === deepId);
+      if (matched) return matched.language;
+    }
     const saved = localStorage.getItem(STORAGE_LANG_KEY);
     return saved === 'hi' ? 'hi' : 'bn';
   });
@@ -122,12 +150,19 @@ export default function App() {
     }
   };
 
-  const [stories, setStories] = useState<StoryItem[]>([]);
-  const [categories, setCategories] = useState<CategoryConfig[]>([
-    { id: 'audio', enabledByAdmin: true, publishedCountBn: 6, publishedCountHi: 6 },
-    { id: 'animation', enabledByAdmin: true, publishedCountBn: 2, publishedCountHi: 2 },
-    { id: 'films', enabledByAdmin: true, publishedCountBn: 2, publishedCountHi: 2 },
-  ]);
+  const [stories, setStories] = useState<StoryItem[]>(() => [...INITIAL_STORIES]);
+  const [categories, setCategories] = useState<CategoryConfig[]>(() =>
+    INITIAL_CATEGORIES.map((c) => ({
+      id: c.id,
+      enabledByAdmin: c.enabledByAdmin,
+      publishedCountBn: INITIAL_STORIES.filter(
+        (s) => s.category === c.id && s.language === 'bn' && s.publicationStatus === 'published',
+      ).length,
+      publishedCountHi: INITIAL_STORIES.filter(
+        (s) => s.category === c.id && s.language === 'hi' && s.publicationStatus === 'published',
+      ).length,
+    })),
+  );
   const [nPassPriceInr, setNPassPriceInr] = useState<number>(9);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
@@ -140,21 +175,27 @@ export default function App() {
     } catch {}
     return createDefaultAdSettings('published');
   });
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [catalogHydrated, setCatalogHydrated] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [activeRoute, setActiveRoute] = useState<ActiveRoute>(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      const deepStoryId = params.get('story');
-      if (deepStoryId) {
-        return { view: 'story', storyId: deepStoryId };
-      }
+    const deepStoryId = parseStoryIdFromLocation();
+    if (deepStoryId) {
+      return { view: 'story', storyId: deepStoryId };
     }
     return { view: 'home', category: 'audio' };
   });
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [showSplash, setShowSplash] = useState<boolean>(true);
+  const [showSplash, setShowSplash] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    if (parseStoryIdFromLocation() || isAutomatedCrawler()) return false;
+    try {
+      if (sessionStorage.getItem('goppo_splash_seen') === '1') return false;
+      sessionStorage.setItem('goppo_splash_seen', '1');
+    } catch {}
+    return true;
+  });
 
   // Audio Player State
   const [activeTrack, setActiveTrack] = useState<ActiveTrack | null>(null);
@@ -218,7 +259,6 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     const bootstrap = async () => {
-      setLoading(true);
       setLoadError(null);
 
       let storiesData = [...INITIAL_STORIES];
@@ -240,7 +280,8 @@ export default function App() {
           cache: 'no-store',
           headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
         });
-        if (res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && contentType.includes('application/json')) {
           const data = (await res.json()) as BootstrapPayload;
           if (data.stories && data.stories.length > 0) storiesData = data.stories;
           if (data.categories) categoriesData = data.categories;
@@ -252,13 +293,17 @@ export default function App() {
             latestAds = normalizeAdSettings(data.adSettings, 'published');
           }
         } else {
-          throw new Error('API fetch failed');
+          throw new Error('Static hosting fallback');
         }
       } catch {
         // Fallback for static Firebase Hosting deployment where Express server is not running:
         if (isFirebaseConfigured && db) {
           try {
-            const snap = await getDocs(collection(db, 'stories'));
+            const publishedStoriesQuery = query(
+              collection(db, 'stories'),
+              where('publicationStatus', '==', 'published'),
+            );
+            const snap = await getDocs(publishedStoriesQuery);
             if (!snap.empty) {
               const cloudStories: StoryItem[] = [];
               snap.forEach((docSnap) => {
@@ -303,16 +348,15 @@ export default function App() {
       setOrders(fetchedOrders);
       setProgress(fetchedProgress);
 
-      // Match deep-linked story language if opened directly via ?story=<id>
-      if (typeof window !== 'undefined') {
-        const deepId = new URLSearchParams(window.location.search).get('story');
-        if (deepId) {
-          const found = storiesData.find((s) => s.id === deepId);
-          if (found) {
-            setLanguage(found.language);
-          }
+      // Match deep-linked story language if opened directly via /story/<id> or ?story=<id>
+      const deepId = parseStoryIdFromLocation();
+      if (deepId) {
+        const found = storiesData.find((s) => s.id === deepId);
+        if (found) {
+          setLanguage(found.language);
         }
       }
+      setCatalogHydrated(true);
       setLoading(false);
     };
     bootstrap();
@@ -589,7 +633,22 @@ export default function App() {
     return visiblePublishedStories[0] || null;
   }, [visiblePublishedStories]);
 
-  // Dynamic SEO metadata & canonical URL synchronization for Google Search / SPA routes
+  // Browser history synchronization for /story/<id>, legacy ?story=<id>, and home routes
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onPopState = () => {
+      const deepId = parseStoryIdFromLocation();
+      if (deepId) {
+        setActiveRoute({ view: 'story', storyId: deepId });
+      } else {
+        setActiveRoute({ view: 'home', category: 'audio' });
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  // Dynamic SEO metadata, canonical URL, and Schema.org JSON-LD synchronization
   useEffect(() => {
     if (typeof window === 'undefined' || typeof document === 'undefined') return;
     const activeStory =
@@ -597,9 +656,11 @@ export default function App() {
         ? stories.find((s) => s.id === activeRoute.storyId)
         : undefined;
 
+    const baseOrigin = window.location.origin;
     const baseTitle = 'Goppo Kahini – Bengali & Hindi Audio Stories & Films';
     const baseDescription =
       'Stream original Bengali and Hindi audio stories, animations, and films on Goppo Kahini. Listen to free previews or unlock ad-free stories anytime.';
+    const defaultOgImage = `${baseOrigin}/assets/aistudio/Glossy_Red_Infinity_Ribbon_Logo_2028e914.png`;
 
     const nextTitle = activeStory
       ? `${activeStory.title} – Goppo Kahini`
@@ -608,8 +669,31 @@ export default function App() {
       ? `${activeStory.subtitle ? `${activeStory.subtitle}. ` : ''}${activeStory.synopsis}`.slice(0, 158)
       : baseDescription;
     const canonicalUrl = activeStory
-      ? `${window.location.origin}${window.location.pathname}?story=${encodeURIComponent(activeStory.id)}`
-      : `${window.location.origin}${window.location.pathname}`;
+      ? `${baseOrigin}/story/${encodeURIComponent(activeStory.id)}`
+      : `${baseOrigin}/`;
+
+    let ogImageUrl = defaultOgImage;
+    if (activeStory) {
+      const resolvedArt = resolveArtworkUrl(activeStory.coverArt);
+      if (resolvedArt) {
+        if (resolvedArt.startsWith('http://') || resolvedArt.startsWith('https://')) {
+          ogImageUrl = resolvedArt;
+        } else if (resolvedArt.startsWith('/')) {
+          ogImageUrl = `${baseOrigin}${resolvedArt}`;
+        }
+      }
+    }
+
+    // Sync clean browser URL on in-app navigation while preserving legacy ?story= landing links
+    const currentSearchStory = new URLSearchParams(window.location.search).get('story');
+    if (activeRoute.view === 'story' && activeStory) {
+      const targetPath = `/story/${encodeURIComponent(activeStory.id)}`;
+      if (window.location.pathname !== targetPath && !currentSearchStory) {
+        window.history.pushState({ storyId: activeStory.id }, '', targetPath);
+      }
+    } else if (activeRoute.view !== 'story' && window.location.pathname.startsWith('/story/')) {
+      window.history.pushState({}, '', '/');
+    }
 
     document.title = nextTitle;
 
@@ -622,8 +706,14 @@ export default function App() {
     setMetaContent('meta[property="og:title"]', nextTitle);
     setMetaContent('meta[property="og:description"]', nextDescription);
     setMetaContent('meta[property="og:url"]', canonicalUrl);
+    setMetaContent('meta[property="og:image"]', ogImageUrl);
+    setMetaContent(
+      'meta[property="og:locale"]',
+      activeStory?.language === 'hi' ? 'hi_IN' : 'bn_IN',
+    );
     setMetaContent('meta[name="twitter:title"]', nextTitle);
     setMetaContent('meta[name="twitter:description"]', nextDescription);
+    setMetaContent('meta[name="twitter:image"]', ogImageUrl);
 
     let canonicalEl = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
     if (!canonicalEl) {
@@ -632,6 +722,44 @@ export default function App() {
       document.head.appendChild(canonicalEl);
     }
     canonicalEl.setAttribute('href', canonicalUrl);
+
+    const existingStoryLd = document.getElementById('dynamic-story-jsonld');
+    if (activeStory) {
+      const ldScript =
+        (existingStoryLd as HTMLScriptElement | null) || document.createElement('script');
+      ldScript.id = 'dynamic-story-jsonld';
+      ldScript.type = 'application/ld+json';
+      ldScript.textContent = JSON.stringify({
+        '@context': 'https://schema.org',
+        '@type':
+          activeStory.category === 'films'
+            ? 'Movie'
+            : activeStory.category === 'animation'
+              ? 'TVSeries'
+              : 'CreativeWorkSeries',
+        name: activeStory.title,
+        headline: activeStory.subtitle || activeStory.title,
+        description: activeStory.synopsis,
+        url: canonicalUrl,
+        image: ogImageUrl,
+        inLanguage: activeStory.language === 'hi' ? 'hi' : 'bn',
+        genre: activeStory.genre,
+        author: {
+          '@type': 'Person',
+          name: activeStory.writer || 'Goppo Kahini Studio',
+        },
+        publisher: {
+          '@type': 'Organization',
+          name: 'Goppo Kahini',
+          url: baseOrigin,
+        },
+      });
+      if (!existingStoryLd) {
+        document.head.appendChild(ldScript);
+      }
+    } else if (existingStoryLd) {
+      existingStoryLd.remove();
+    }
   }, [activeRoute, stories]);
 
   const handleSelectHeroStory = async (storyId: string) => {
@@ -1392,6 +1520,14 @@ export default function App() {
             {/* VIEW 3: STORY DETAILS & EPISODES */}
             {activeRoute.view === 'story' && (() => {
               const targetStory = stories.find((s) => s.id === activeRoute.storyId);
+              if (!targetStory && !catalogHydrated) {
+                return (
+                  <div className="py-24 flex flex-col items-center justify-center space-y-4">
+                    <div className="h-9 w-9 rounded-full border-2 border-[#EF4444] border-t-transparent animate-spin" />
+                    <p className="text-sm text-[#A69E95] tracking-wide">Goppo Kahini...</p>
+                  </div>
+                );
+              }
               if (!targetStory) {
                 return (
                   <div className="py-16 text-center space-y-4">
@@ -1519,9 +1655,7 @@ export default function App() {
           title={heroShareStory.title}
           url={
             typeof window !== 'undefined'
-              ? `${window.location.origin}${window.location.pathname}?story=${encodeURIComponent(
-                  heroShareStory.id,
-                )}`
+              ? `${window.location.origin}/story/${encodeURIComponent(heroShareStory.id)}`
               : undefined
           }
           t={t}

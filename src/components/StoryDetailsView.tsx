@@ -65,7 +65,7 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
 
   const storyUrl =
     typeof window !== 'undefined'
-      ? `${window.location.origin}${window.location.pathname}?story=${encodeURIComponent(story.id)}`
+      ? `${window.location.origin}/story/${encodeURIComponent(story.id)}`
       : '';
 
   const storyOverallProgress = progress.find((p) => p.storyId === story.id);

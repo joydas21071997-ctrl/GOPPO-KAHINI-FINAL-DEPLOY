@@ -1615,7 +1615,7 @@ Respond with strictly valid JSON in this exact structure:
       `  <url>\n    <loc>${escapeXml(`${baseUrl}/`)}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>1.0</priority>\n  </url>`,
       ...publishedStories.map((story) => {
         const lastMod = (story.updatedAt || today).slice(0, 10);
-        const storyUrl = `${baseUrl}/?story=${encodeURIComponent(story.id)}`;
+        const storyUrl = `${baseUrl}/story/${encodeURIComponent(story.id)}`;
         return `  <url>\n    <loc>${escapeXml(storyUrl)}</loc>\n    <lastmod>${escapeXml(lastMod)}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.8</priority>\n  </url>`;
       }),
     ];

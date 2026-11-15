@@ -25,6 +25,7 @@ export default defineConfig(() => {
           clientsClaim: true,
           cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
+          navigateFallback: null,
           globPatterns: ['**/*.{js,css,ico,png,svg,jpg,webp,woff,woff2}'],
           navigateFallbackDenylist: [/^\/api\//, /^\/firebase/, /^\/__/, /^\/robots\.txt$/, /^\/sitemap\.xml$/],
           runtimeCaching: [

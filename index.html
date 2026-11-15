@@ -7,6 +7,17 @@
     <meta name="description" content="Stream original Bengali and Hindi audio stories, animations, and films on Goppo Kahini. Listen to free previews or unlock ad-free stories anytime." />
     <meta name="robots" content="index, follow, max-image-preview:large" />
     <link rel="canonical" href="https://goppokahini.in/" />
+    <script>
+      (function () {
+        try {
+          var q = new URLSearchParams(window.location.search).get('story');
+          if (q) {
+            var c = document.querySelector('link[rel="canonical"]');
+            if (c) c.setAttribute('href', window.location.origin + '/story/' + encodeURIComponent(q));
+          }
+        } catch (e) {}
+      })();
+    </script>
     <meta property="og:site_name" content="Goppo Kahini" />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://goppokahini.in/" />
