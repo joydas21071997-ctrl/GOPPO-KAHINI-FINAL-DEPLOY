@@ -1576,6 +1576,58 @@ Respond with strictly valid JSON in this exact structure:
   });
 
   // ---------------------------------------------------------------------------
+  // SEO: ROBOTS.TXT & DYNAMIC SITEMAP.XML
+  // ---------------------------------------------------------------------------
+  const resolvePublicBaseUrl = (req: Request): string => {
+    const envUrl = (process.env.APP_URL || '').trim().replace(/\/+$/, '');
+    if (envUrl) return envUrl;
+    const protoHeader = req.headers['x-forwarded-proto'];
+    const proto = Array.isArray(protoHeader)
+      ? protoHeader[0]
+      : protoHeader?.split(',')[0]?.trim() || req.protocol || 'https';
+    const host = req.get('host') || 'goppokahini.in';
+    return `${proto}://${host}`;
+  };
+
+  const escapeXml = (str: string): string =>
+    str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+
+  app.get('/robots.txt', (req: Request, res: Response) => {
+    const baseUrl = resolvePublicBaseUrl(req);
+    res.type('text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    res.send(`User-agent: *\nAllow: /\nDisallow: /api/\n\nSitemap: ${baseUrl}/sitemap.xml\n`);
+  });
+
+  app.get('/sitemap.xml', (req: Request, res: Response) => {
+    const baseUrl = resolvePublicBaseUrl(req);
+    const publishedStories = state.stories.filter(
+      (s) => s.publicationStatus === 'published',
+    );
+    const today = new Date().toISOString().slice(0, 10);
+
+    const urlEntries = [
+      `  <url>\n    <loc>${escapeXml(`${baseUrl}/`)}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>1.0</priority>\n  </url>`,
+      ...publishedStories.map((story) => {
+        const lastMod = (story.updatedAt || today).slice(0, 10);
+        const storyUrl = `${baseUrl}/?story=${encodeURIComponent(story.id)}`;
+        return `  <url>\n    <loc>${escapeXml(storyUrl)}</loc>\n    <lastmod>${escapeXml(lastMod)}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.8</priority>\n  </url>`;
+      }),
+    ];
+
+    res.type('application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    res.send(
+      `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urlEntries.join('\n')}\n</urlset>\n`,
+    );
+  });
+
+  // ---------------------------------------------------------------------------
   // VITE DEV MIDDLEWARE OR PRODUCTION STATIC ASSETS
   // ---------------------------------------------------------------------------
   const distPath = path.resolve(process.cwd(), 'dist');

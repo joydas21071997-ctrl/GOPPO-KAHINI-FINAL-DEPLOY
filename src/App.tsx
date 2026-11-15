@@ -589,6 +589,51 @@ export default function App() {
     return visiblePublishedStories[0] || null;
   }, [visiblePublishedStories]);
 
+  // Dynamic SEO metadata & canonical URL synchronization for Google Search / SPA routes
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const activeStory =
+      activeRoute.view === 'story'
+        ? stories.find((s) => s.id === activeRoute.storyId)
+        : undefined;
+
+    const baseTitle = 'Goppo Kahini – Bengali & Hindi Audio Stories & Films';
+    const baseDescription =
+      'Stream original Bengali and Hindi audio stories, animations, and films on Goppo Kahini. Listen to free previews or unlock ad-free stories anytime.';
+
+    const nextTitle = activeStory
+      ? `${activeStory.title} – Goppo Kahini`
+      : baseTitle;
+    const nextDescription = activeStory
+      ? `${activeStory.subtitle ? `${activeStory.subtitle}. ` : ''}${activeStory.synopsis}`.slice(0, 158)
+      : baseDescription;
+    const canonicalUrl = activeStory
+      ? `${window.location.origin}${window.location.pathname}?story=${encodeURIComponent(activeStory.id)}`
+      : `${window.location.origin}${window.location.pathname}`;
+
+    document.title = nextTitle;
+
+    const setMetaContent = (selector: string, content: string) => {
+      const el = document.querySelector<HTMLMetaElement>(selector);
+      if (el) el.setAttribute('content', content);
+    };
+
+    setMetaContent('meta[name="description"]', nextDescription);
+    setMetaContent('meta[property="og:title"]', nextTitle);
+    setMetaContent('meta[property="og:description"]', nextDescription);
+    setMetaContent('meta[property="og:url"]', canonicalUrl);
+    setMetaContent('meta[name="twitter:title"]', nextTitle);
+    setMetaContent('meta[name="twitter:description"]', nextDescription);
+
+    let canonicalEl = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+    if (!canonicalEl) {
+      canonicalEl = document.createElement('link');
+      canonicalEl.setAttribute('rel', 'canonical');
+      document.head.appendChild(canonicalEl);
+    }
+    canonicalEl.setAttribute('href', canonicalUrl);
+  }, [activeRoute, stories]);
+
   const handleSelectHeroStory = async (storyId: string) => {
     if (!authToken) return;
     try {
