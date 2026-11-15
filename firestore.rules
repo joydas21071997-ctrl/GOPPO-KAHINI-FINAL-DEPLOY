@@ -172,6 +172,78 @@ service cloud.firestore {
         data.updatedAt == request.time;
     }
 
+    function isValidFormatControl(ctrl) {
+      return ctrl is map &&
+        ctrl.keys().hasAll(['enabled', 'desktop', 'mobile']) &&
+        ctrl.keys().hasOnly(['enabled', 'desktop', 'mobile']) &&
+        ctrl.enabled is bool &&
+        ctrl.desktop is bool &&
+        ctrl.mobile is bool;
+    }
+
+    function isValidAdConfiguration(data, settingId) {
+      return settingId in ['draft', 'published'] &&
+        data.keys().hasAll([
+          'enabled', 'version', 'status', 'socialBarScript', 'socialBarMobileScript',
+          'popunderScript', 'popunderMobileScript', 'smartlinkUrl', 'banner320x50Code',
+          'banner320x50DesktopCode', 'banner160x300Code', 'nativeAdCode', 'nativeAdMobileCode',
+          'enabledTypes', 'pages', 'slots', 'devices', 'updatedBy', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'enabled', 'version', 'status', 'socialBarScript', 'socialBarMobileScript',
+          'popunderScript', 'popunderMobileScript', 'smartlinkUrl', 'banner320x50Code',
+          'banner320x50DesktopCode', 'banner160x300Code', 'nativeAdCode', 'nativeAdMobileCode',
+          'enabledTypes', 'pages', 'slots', 'devices', 'publishedAt', 'updatedBy', 'updatedAt'
+        ]) &&
+        data.enabled is bool &&
+        data.version is number && data.version >= 1 && data.version <= 1000000 &&
+        data.status == settingId &&
+        data.socialBarScript is string && data.socialBarScript.size() <= 12000 &&
+        data.socialBarMobileScript is string && data.socialBarMobileScript.size() <= 12000 &&
+        data.popunderScript is string && data.popunderScript.size() <= 12000 &&
+        data.popunderMobileScript is string && data.popunderMobileScript.size() <= 12000 &&
+        data.smartlinkUrl is string && data.smartlinkUrl.size() <= 1000 &&
+        data.banner320x50Code is string && data.banner320x50Code.size() <= 12000 &&
+        data.banner320x50DesktopCode is string && data.banner320x50DesktopCode.size() <= 12000 &&
+        data.banner160x300Code is string && data.banner160x300Code.size() <= 12000 &&
+        data.nativeAdCode is string && data.nativeAdCode.size() <= 12000 &&
+        data.nativeAdMobileCode is string && data.nativeAdMobileCode.size() <= 12000 &&
+        data.enabledTypes is map &&
+        data.enabledTypes.keys().hasAll(['banner_320x50', 'banner_160x300', 'native_ad', 'social_bar', 'popunder', 'smartlink']) &&
+        data.enabledTypes.keys().hasOnly(['banner_320x50', 'banner_160x300', 'native_ad', 'social_bar', 'popunder', 'smartlink']) &&
+        isValidFormatControl(data.enabledTypes.banner_320x50) &&
+        isValidFormatControl(data.enabledTypes.banner_160x300) &&
+        isValidFormatControl(data.enabledTypes.native_ad) &&
+        isValidFormatControl(data.enabledTypes.social_bar) &&
+        isValidFormatControl(data.enabledTypes.popunder) &&
+        isValidFormatControl(data.enabledTypes.smartlink) &&
+        data.pages is map &&
+        data.pages.keys().hasAll(['home', 'catalog', 'story_details', 'player']) &&
+        data.pages.keys().hasOnly(['home', 'catalog', 'story_details', 'player']) &&
+        data.pages.home is bool &&
+        data.pages.catalog is bool &&
+        data.pages.story_details is bool &&
+        data.pages.player is bool &&
+        data.slots is map &&
+        data.slots.keys().hasAll(['home_top', 'home_middle', 'home_bottom', 'catalog_inline', 'story_details_top', 'story_details_bottom', 'player_banner']) &&
+        data.slots.keys().hasOnly(['home_top', 'home_middle', 'home_bottom', 'catalog_inline', 'story_details_top', 'story_details_bottom', 'player_banner']) &&
+        data.slots.home_top is bool &&
+        data.slots.home_middle is bool &&
+        data.slots.home_bottom is bool &&
+        data.slots.catalog_inline is bool &&
+        data.slots.story_details_top is bool &&
+        data.slots.story_details_bottom is bool &&
+        data.slots.player_banner is bool &&
+        data.devices is map &&
+        data.devices.keys().hasAll(['desktop', 'mobile']) &&
+        data.devices.keys().hasOnly(['desktop', 'mobile']) &&
+        data.devices.desktop is bool &&
+        data.devices.mobile is bool &&
+        (!('publishedAt' in data) || (data.publishedAt is string && data.publishedAt.size() <= 64)) &&
+        data.updatedBy == request.auth.uid &&
+        data.updatedAt == request.time;
+    }
+
     // Owner/Admin registry: read by own admin or other admins; only bootstrapped verified owner can register own doc once
     match /admins/{userId} {
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
@@ -308,6 +380,33 @@ service cloud.firestore {
         incoming().diff(existing()).affectedKeys().hasOnly([
           'nPassMonthlyPriceInr', 'defaultTicketPriceInr', 'maxListensPerPurchase', 'updatedBy', 'updatedAt'
         ]);
+      allow delete: if isValidId(settingId) && isAdmin();
+    }
+
+    // Advertisement settings: 'published' is publicly readable by web/PWA; 'draft' and all writes restricted to Admin
+    match /ad_settings/{settingId} {
+      allow get: if isValidId(settingId) && (
+        settingId == 'published' ||
+        (settingId == 'draft' && isAdmin())
+      );
+      allow list: if isAdmin();
+      allow create: if isSignedIn() &&
+        isValidId(settingId) &&
+        settingId in ['draft', 'published'] &&
+        isValidAdConfiguration(incoming(), settingId) &&
+        isAdmin();
+      allow update: if isSignedIn() &&
+        isValidId(settingId) &&
+        settingId in ['draft', 'published'] &&
+        isValidAdConfiguration(incoming(), settingId) &&
+        incoming().status == existing().status &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'enabled', 'version', 'socialBarScript', 'socialBarMobileScript',
+          'popunderScript', 'popunderMobileScript', 'smartlinkUrl', 'banner320x50Code',
+          'banner320x50DesktopCode', 'banner160x300Code', 'nativeAdCode', 'nativeAdMobileCode',
+          'enabledTypes', 'pages', 'slots', 'devices', 'publishedAt', 'updatedBy', 'updatedAt'
+        ]) &&
+        isAdmin();
       allow delete: if isValidId(settingId) && isAdmin();
     }
   }

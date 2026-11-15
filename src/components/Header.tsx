@@ -3,6 +3,7 @@ import { Crown, Menu, Search, Sparkles, User, X, BookOpen, Headphones, Film, Hom
 import type { CategoryConfig, ContentCategory, Language, UserProfile } from '../types/content';
 import type { UIStrings } from '../i18n/translations';
 import { GoppoKahiniLogo } from './GoppoKahiniLogo';
+import { PWAInstallButton } from './PWAInstallButton';
 
 export type StoryCollectionFilter = ContentCategory | 'all' | 'free' | 'premium';
 
@@ -236,6 +237,8 @@ export const Header: React.FC<HeaderProps> = ({
             </select>
           </div>
 
+          <PWAInstallButton compact />
+
           {/* Profile / Free Login & Registration Button */}
           <button
             type="button"
@@ -354,6 +357,10 @@ export const Header: React.FC<HeaderProps> = ({
                 <span>{t.nav.admin}</span>
               </button>
             )}
+
+            <div className="pt-2 flex justify-start">
+              <PWAInstallButton />
+            </div>
           </div>
         </div>
       )}

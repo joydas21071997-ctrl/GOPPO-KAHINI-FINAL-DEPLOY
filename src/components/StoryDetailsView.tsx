@@ -284,6 +284,13 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
             </div>
           </div>
 
+          {/* Promotional Trailer Ad Slot (shown to unpaid visitors & free trailer listeners) */}
+          <AdSlotContainer
+            placement="story_details_top"
+            isAdFreeContent={hasVerifiedAccess}
+            adSettings={adSettings}
+          />
+
           {/* Contiguous Purchase & Access Module (Zero Subscription / Zero App Pass) */}
           <div className="rounded-2xl bg-gradient-to-b from-[#16131A] via-[#120F16] to-[#0C0A0E] border border-red-500/20 p-5 sm:p-6 space-y-4 shadow-xl">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -372,10 +379,10 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
         </div>
       </div>
 
-      {/* Future-Ready Ad Boundary (Strictly Suppressed on Premium / Purchased Ad-Free Content) */}
+      {/* Ad Boundary (Suppressed only for listeners with verified Ticket / N Pass) */}
       <AdSlotContainer
-        placement="free_story_details"
-        isAdFreeContent={isPremium || hasFullAccess}
+        placement="story_details_bottom"
+        isAdFreeContent={hasVerifiedAccess}
         adSettings={adSettings}
       />
 
@@ -485,7 +492,7 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
         {adSettings?.banner160x300Code && (
           <AdSlotContainer
             placement="story_details_sidebar"
-            isAdFreeContent={isPremium || hasFullAccess}
+            isAdFreeContent={hasVerifiedAccess}
             adSettings={adSettings}
           />
         )}

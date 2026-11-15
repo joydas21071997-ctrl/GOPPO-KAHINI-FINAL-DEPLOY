@@ -11,9 +11,12 @@ import {
 } from 'lucide-react';
 import { onIdTokenChanged, signOut } from 'firebase/auth';
 import { auth, db, isFirebaseConfigured } from './firebase';
-import { collection, getDocs } from 'firebase/firestore';
+import { collection, doc, getDocFromServer, getDocs, onSnapshot } from 'firebase/firestore';
 import { INITIAL_STORIES, INITIAL_CATEGORIES, NPASS_MONTHLY_PRICE_INR } from '../server/catalogSeed';
-import { syncPlaybackProgressToFirestore } from './services/firestoreService';
+import {
+  fetchPublishedAdsFromFirestore,
+  syncPlaybackProgressToFirestore,
+} from './services/firestoreService';
 import type {
   BootstrapPayload,
   CategoryConfig,
@@ -44,7 +47,14 @@ import { SplashScreen } from './components/SplashScreen';
 import { SocialShareModal } from './components/SocialShareModal';
 import { StoryProgressIndicator } from './components/StoryProgressIndicator';
 import { AdSlotContainer } from './components/AdSlotContainer';
+import { OfflineIndicator } from './components/PWAInstallButton';
 import { ArtworkImage } from './components/ArtworkImage';
+import { useIsMobileDevice } from './hooks/useIsMobileDevice';
+import {
+  createDefaultAdSettings,
+  isAdAllowedOnDevice,
+  normalizeAdSettings,
+} from './utils/adConfig';
 import {
   getRemainingListens,
   getStoryProgress,
@@ -122,19 +132,13 @@ export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [progress, setProgress] = useState<PlaybackProgress[]>([]);
+  const isMobileDevice = useIsMobileDevice();
   const [adSettings, setAdSettings] = useState<AdSettings>(() => {
     try {
       const saved = localStorage.getItem('goppo_kahini_ads');
-      if (saved) return JSON.parse(saved);
+      if (saved) return normalizeAdSettings(JSON.parse(saved), 'published');
     } catch {}
-    return {
-      enabled: false,
-      socialBarScript: '',
-      popunderScript: '',
-      smartlinkUrl: '',
-      banner320x50Code: '',
-      banner160x300Code: '',
-    };
+    return createDefaultAdSettings('published');
   });
   const [loading, setLoading] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -229,8 +233,11 @@ export default function App() {
       let fetchedOrders: OrderRecord[] = [];
       let fetchedProgress: PlaybackProgress[] = [];
 
+      let latestAds: AdSettings | null = null;
+
       try {
         const res = await fetch('/api/bootstrap', {
+          cache: 'no-store',
           headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
         });
         if (res.ok) {
@@ -242,10 +249,7 @@ export default function App() {
           fetchedOrders = data.orders || [];
           fetchedProgress = data.progress || [];
           if (data.adSettings) {
-            setAdSettings(data.adSettings);
-            try {
-              localStorage.setItem('goppo_kahini_ads', JSON.stringify(data.adSettings));
-            } catch {}
+            latestAds = normalizeAdSettings(data.adSettings, 'published');
           }
         } else {
           throw new Error('API fetch failed');
@@ -269,6 +273,26 @@ export default function App() {
             // Keep INITIAL_STORIES fallback
           }
         }
+      }
+
+      // Always verify latest Published Ad Configuration directly from Firestore server
+      // so static Hosting & installed Chrome PWAs stay 100% synchronized with Admin publishes.
+      if (isFirebaseConfigured && db) {
+        const firestoreAds = await fetchPublishedAdsFromFirestore();
+        if (firestoreAds) {
+          const fsTime = firestoreAds.publishedAt ? Date.parse(firestoreAds.publishedAt) : 0;
+          const apiTime = latestAds?.publishedAt ? Date.parse(latestAds.publishedAt) : 0;
+          if (!latestAds || fsTime >= apiTime || firestoreAds.version >= latestAds.version) {
+            latestAds = firestoreAds;
+          }
+        }
+      }
+
+      if (latestAds && !cancelled) {
+        setAdSettings(latestAds);
+        try {
+          localStorage.setItem('goppo_kahini_ads', JSON.stringify(latestAds));
+        } catch {}
       }
 
       if (cancelled) return;
@@ -297,20 +321,102 @@ export default function App() {
     };
   }, [authToken]);
 
-  // Dynamic Social Bar & Popunder Script Injection for free listener monetization
+  // Real-Time Firestore Listener + PWA Resume Refresh for Published Ad Configuration
   useEffect(() => {
-    const isAdFree = user?.membership.status === 'ACTIVE';
-    if (isAdFree || !adSettings.enabled) {
-      const existingSocial = document.getElementById('gk-ad-social-bar');
-      if (existingSocial) existingSocial.remove();
-      const existingPopunder = document.getElementById('gk-ad-popunder');
-      if (existingPopunder) existingPopunder.remove();
+    let unsubFirestore: (() => void) | null = null;
+
+    const applyPublishedAds = (nextAds: AdSettings) => {
+      setAdSettings(nextAds);
+      try {
+        localStorage.setItem('goppo_kahini_ads', JSON.stringify(nextAds));
+      } catch {}
+    };
+
+    const refreshPublishedAds = async () => {
+      if (isFirebaseConfigured && db) {
+        try {
+          const snap = await getDocFromServer(doc(db, 'ad_settings', 'published'));
+          if (snap.exists()) {
+            applyPublishedAds(normalizeAdSettings(snap.data(), 'published'));
+            return;
+          }
+        } catch {
+          // Try server API fallback below
+        }
+      }
+      try {
+        const res = await fetch('/api/ads/published', { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.adSettings) {
+            applyPublishedAds(normalizeAdSettings(data.adSettings, 'published'));
+          }
+        }
+      } catch {
+        // Offline mode uses last synced localStorage state
+      }
+    };
+
+    if (isFirebaseConfigured && db) {
+      unsubFirestore = onSnapshot(
+        doc(db, 'ad_settings', 'published'),
+        (snap) => {
+          if (snap.exists()) {
+            applyPublishedAds(normalizeAdSettings(snap.data(), 'published'));
+          }
+        },
+        () => {
+          // Non-fatal fallback if offline or document uninitialized
+        },
+      );
+    }
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshPublishedAds();
+      }
+    };
+    const handleFocus = () => {
+      void refreshPublishedAds();
+    };
+    const handleOnline = () => {
+      void refreshPublishedAds();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      if (unsubFirestore) unsubFirestore();
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, []);
+
+  // Dynamic Social Bar & Popunder Script Injection (respects Master, Page, Device, and Ad-Free status)
+  useEffect(() => {
+    const isAdFree = user?.membership.status === 'ACTIVE' || activeRoute.view === 'admin';
+    const currentPageKey =
+      activeRoute.view === 'story'
+        ? 'story_details'
+        : activeRoute.view === 'all_stories' || activeRoute.view === 'npass'
+          ? 'catalog'
+          : 'home';
+    const pageAllowed = adSettings.pages?.[currentPageKey] ?? true;
+
+    const cleanupInjectedScripts = () => {
+      document.querySelectorAll('[data-gk-ad-script="true"]').forEach((el) => el.remove());
+    };
+
+    if (isAdFree || !adSettings.enabled || !pageAllowed) {
+      cleanupInjectedScripts();
       return;
     }
 
-    // Helper to evaluate and append script tags safely
     const injectRawScriptSnippet = (id: string, snippet: string) => {
-      if (!snippet || document.getElementById(id)) return;
+      if (!snippet || !snippet.trim()) return;
       try {
         const wrapper = document.createElement('div');
         wrapper.innerHTML = snippet;
@@ -320,6 +426,7 @@ export default function App() {
             const original = scriptTags[i];
             const fresh = document.createElement('script');
             fresh.id = i === 0 ? id : `${id}-${i}`;
+            fresh.setAttribute('data-gk-ad-script', 'true');
             Array.from(original.attributes).forEach((attr) => {
               if (attr.name !== 'id') {
                 fresh.setAttribute(attr.name, attr.value);
@@ -337,6 +444,7 @@ export default function App() {
           if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('//')) {
             const fresh = document.createElement('script');
             fresh.id = id;
+            fresh.setAttribute('data-gk-ad-script', 'true');
             fresh.src = trimmed;
             fresh.async = true;
             document.body.appendChild(fresh);
@@ -347,20 +455,30 @@ export default function App() {
       }
     };
 
-    if (adSettings.socialBarScript) {
-      injectRawScriptSnippet('gk-ad-social-bar', adSettings.socialBarScript);
+    cleanupInjectedScripts();
+
+    if (isAdAllowedOnDevice(adSettings, 'social_bar', isMobileDevice)) {
+      const socialSnippet = isMobileDevice
+        ? adSettings.socialBarMobileScript || adSettings.socialBarScript
+        : adSettings.socialBarScript;
+      if (socialSnippet) {
+        injectRawScriptSnippet('gk-ad-social-bar', socialSnippet);
+      }
     }
-    if (adSettings.popunderScript) {
-      injectRawScriptSnippet('gk-ad-popunder', adSettings.popunderScript);
+
+    if (isAdAllowedOnDevice(adSettings, 'popunder', isMobileDevice)) {
+      const popSnippet = isMobileDevice
+        ? adSettings.popunderMobileScript || adSettings.popunderScript
+        : adSettings.popunderScript;
+      if (popSnippet) {
+        injectRawScriptSnippet('gk-ad-popunder', popSnippet);
+      }
     }
 
     return () => {
-      const existingSocial = document.getElementById('gk-ad-social-bar');
-      if (existingSocial) existingSocial.remove();
-      const existingPopunder = document.getElementById('gk-ad-popunder');
-      if (existingPopunder) existingPopunder.remove();
+      cleanupInjectedScripts();
     };
-  }, [adSettings, user]);
+  }, [adSettings, user, isMobileDevice, activeRoute.view]);
 
   const handleLanguageChange = (nextLang: Language) => {
     if (nextLang === language) return;
@@ -695,6 +813,7 @@ export default function App() {
 
       {/* Interactive Notification Permission Modal */}
       <NotificationPermissionModal />
+      <OfflineIndicator />
 
       <Header
         language={language}
@@ -844,17 +963,20 @@ export default function App() {
                       <span>{t.nav.premium}</span>
                     </button>
 
-                    {adSettings?.enabled && adSettings?.smartlinkUrl && user?.membership?.status !== 'ACTIVE' && (
-                      <a
-                        href={adSettings.smartlinkUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-purple-500/20 to-pink-500/20 hover:from-purple-500/30 hover:to-pink-500/30 border border-purple-500/30 text-xs sm:text-sm font-semibold text-pink-300 whitespace-nowrap shrink-0 transition-all shadow-sm"
-                      >
-                        <Sparkles className="h-4 w-4 text-pink-400" />
-                        <span>🔥 বিশেষ অফার</span>
-                      </a>
-                    )}
+                    {adSettings?.smartlinkUrl &&
+                      user?.membership?.status !== 'ACTIVE' &&
+                      (adSettings.pages?.home ?? true) &&
+                      isAdAllowedOnDevice(adSettings, 'smartlink', isMobileDevice) && (
+                        <a
+                          href={adSettings.smartlinkUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-purple-500/20 to-pink-500/20 hover:from-purple-500/30 hover:to-pink-500/30 border border-purple-500/30 text-xs sm:text-sm font-semibold text-pink-300 whitespace-nowrap shrink-0 transition-all shadow-sm"
+                        >
+                          <Sparkles className="h-4 w-4 text-pink-400" />
+                          <span>🔥 বিশেষ অফার</span>
+                        </a>
+                      )}
                   </div>
 
                   <button
@@ -865,6 +987,13 @@ export default function App() {
                     {t.cards.viewAll} ({visiblePublishedStories.length}) →
                   </button>
                 </div>
+
+                {/* Home Ad Slot 1: Top (Below Hero & Quick Filter Strip) */}
+                <AdSlotContainer
+                  placement="home_top"
+                  isAdFreeContent={user?.membership.status === 'ACTIVE'}
+                  adSettings={adSettings}
+                />
 
                 {/* 2. Continue Listening (Rendered when user has synced playback progress) */}
                 {localizedProgress.length > 0 && (
@@ -953,6 +1082,13 @@ export default function App() {
                   onOpenDetails={(storyId) => setActiveRoute({ view: 'story', storyId })}
                   onBuyTicket={handleBuyTicket}
                   onPlayTrailer={handlePlayTrailer}
+                />
+
+                {/* Home Ad Slot 2: Middle (Between Popular Audio & Remaining Series) */}
+                <AdSlotContainer
+                  placement="home_middle"
+                  isAdFreeContent={user?.membership.status === 'ACTIVE'}
+                  adSettings={adSettings}
                 />
 
                 {/* 4. Audio Series (Remaining Audio Stories — zero card repetition) */}
@@ -1047,9 +1183,9 @@ export default function App() {
                   </section>
                 )}
 
-                {/* Future-Ready Non-Intrusive Ad Boundary (Free Home Section Placement) */}
+                {/* Home Ad Slot 3: Bottom (Between Free Stories & Visual/Footer Section) */}
                 <AdSlotContainer
-                  placement="home_between_racks"
+                  placement="home_bottom"
                   isAdFreeContent={user?.membership.status === 'ACTIVE'}
                   adSettings={adSettings}
                 />
@@ -1136,6 +1272,13 @@ export default function App() {
                     );
                   })}
                 </div>
+
+                {/* Catalog Ad Slot */}
+                <AdSlotContainer
+                  placement="catalog_inline"
+                  isAdFreeContent={user?.membership.status === 'ACTIVE'}
+                  adSettings={adSettings}
+                />
 
                 {catalogFilteredStories.length === 0 ? (
                   <div className="rounded-2xl bg-[#161116] border border-white/10 p-10 text-center space-y-3">

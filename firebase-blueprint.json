@@ -462,6 +462,59 @@
         }
       },
       "required": ["key", "updatedBy", "updatedAt"]
+    },
+    "AdConfiguration": {
+      "title": "AdConfiguration",
+      "description": "Draft and Published advertisement monetization configuration controlled strictly by Owner/Admin.",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "version": { "type": "number" },
+        "status": { "type": "string", "enum": ["draft", "published"] },
+        "socialBarScript": { "type": "string", "maxLength": 12000 },
+        "socialBarMobileScript": { "type": "string", "maxLength": 12000 },
+        "popunderScript": { "type": "string", "maxLength": 12000 },
+        "popunderMobileScript": { "type": "string", "maxLength": 12000 },
+        "smartlinkUrl": { "type": "string", "maxLength": 1000 },
+        "banner320x50Code": { "type": "string", "maxLength": 12000 },
+        "banner320x50DesktopCode": { "type": "string", "maxLength": 12000 },
+        "banner160x300Code": { "type": "string", "maxLength": 12000 },
+        "nativeAdCode": { "type": "string", "maxLength": 12000 },
+        "nativeAdMobileCode": { "type": "string", "maxLength": 12000 },
+        "enabledTypes": { "type": "object" },
+        "pages": { "type": "object" },
+        "slots": { "type": "object" },
+        "devices": { "type": "object" },
+        "publishedAt": { "type": "string", "maxLength": 64 },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "enabled",
+        "version",
+        "status",
+        "socialBarScript",
+        "socialBarMobileScript",
+        "popunderScript",
+        "popunderMobileScript",
+        "smartlinkUrl",
+        "banner320x50Code",
+        "banner320x50DesktopCode",
+        "banner160x300Code",
+        "nativeAdCode",
+        "nativeAdMobileCode",
+        "enabledTypes",
+        "pages",
+        "slots",
+        "devices",
+        "updatedBy",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -504,6 +557,10 @@
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/PlatformSetting" },
       "description": "Admin-only platform configuration documents."
+    },
+    "/ad_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/AdConfiguration" },
+      "description": "Advertisement monetization settings separated into admin-only draft and publicly readable published docs."
     }
   }
 }

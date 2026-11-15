@@ -521,6 +521,14 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
       {/* COMPACT PERSISTENT MINI-PLAYER BAR */}
       {!expanded && (
         <div className="fixed bottom-0 inset-x-0 z-40 bg-gradient-to-r from-[#0E0C11]/95 via-[#110E14]/95 to-[#0D0B10]/95 backdrop-blur-xl border-t border-white/[0.08] shadow-2xl shadow-black">
+          <AdSlotContainer
+            placement="player_banner"
+            isAdFreeContent={Boolean(isAdFreeUser) || (!track.isTrailer && isPremiumStory(track.story))}
+            adSettings={adSettings}
+            compact
+            className="mx-auto max-w-md !my-1 !bg-transparent !border-0 !shadow-none"
+          />
+
           {/* Top progress indicator */}
           <div className="h-0.5 w-full bg-white/[0.05]">
             <div

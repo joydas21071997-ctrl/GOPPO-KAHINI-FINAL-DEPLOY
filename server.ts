@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import express from 'express';
@@ -48,6 +49,7 @@ import type {
   StoryTicketEntitlement,
   UserProfile,
 } from './src/types/content.ts';
+import { createDefaultAdSettings, normalizeAdSettings } from './src/utils/adConfig.ts';
 
 dotenv.config();
 
@@ -68,6 +70,7 @@ interface PersistedState {
   nPassMonthlyPriceInr?: number;
   pricingMigratedTo9?: boolean;
   adSettings?: AdSettings;
+  adDraftSettings?: AdSettings;
 }
 
 const DATA_DIR = path.resolve(process.cwd(), '.goppo-data');
@@ -96,14 +99,8 @@ function createDefaultState(): PersistedState {
     sessions: {},
     orders: [],
     progressByUser: {},
-    adSettings: {
-      enabled: false,
-      socialBarScript: '',
-      popunderScript: '',
-      smartlinkUrl: '',
-      banner320x50Code: '',
-      banner160x300Code: '',
-    },
+    adSettings: createDefaultAdSettings('published'),
+    adDraftSettings: createDefaultAdSettings('draft'),
   };
 }
 
@@ -180,6 +177,11 @@ function loadState(): PersistedState {
           }
         }
         parsed.sessions = cleanedSessions;
+        parsed.adSettings = normalizeAdSettings(parsed.adSettings, 'published');
+        parsed.adDraftSettings = normalizeAdSettings(
+          parsed.adDraftSettings || parsed.adSettings,
+          'draft',
+        );
         return parsed;
       }
     }
@@ -435,6 +437,10 @@ async function startServer() {
       ? sorted
       : sorted.filter((s) => s.publicationStatus === 'published');
 
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     const payload: BootstrapPayload = {
       stories: visibleStories,
       categories: computeCategories(),
@@ -443,40 +449,82 @@ async function startServer() {
       user,
       orders: user ? state.orders.filter((o) => o.userId === user.id) : [],
       progress: user ? state.progressByUser[user.id] || [] : [],
-      adSettings: state.adSettings || {
-        enabled: false,
-        socialBarScript: '',
-        popunderScript: '',
-        smartlinkUrl: '',
-        banner320x50Code: '',
-        banner160x300Code: '',
-      },
+      adSettings: normalizeAdSettings(state.adSettings, 'published'),
     };
     res.json(payload);
   });
 
+  // Dedicated public no-cache endpoint for Published Ad Configuration (used by web + PWA)
+  app.get('/api/ads/published', (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.json({
+      adSettings: normalizeAdSettings(state.adSettings, 'published'),
+    });
+  });
+
   // ---------------------------------------------------------------------------
-  // ADVERTISEMENT SETTINGS MANAGEMENT (Protected: Staff with manage_stories / manage_categories)
+  // ADVERTISEMENT SETTINGS MANAGEMENT (Draft + Publish workflow, Protected)
   // ---------------------------------------------------------------------------
-  app.post('/api/admin/ads', async (req: Request, res: Response) => {
+  app.post('/api/admin/ads/draft', async (req: Request, res: Response) => {
     const user = await resolveAuthenticatedUser(req);
     if (!hasStaffPermission(user, 'manage_stories') && !hasStaffPermission(user, 'manage_categories')) {
-      res.status(403).json({ error: 'Permission required to update ad settings.' });
+      res.status(403).json({ error: 'Permission required to save ad draft settings.' });
       return;
     }
 
-    const { enabled, socialBarScript, popunderScript, smartlinkUrl, banner320x50Code, banner160x300Code } = req.body || {};
-    state.adSettings = {
-      enabled: Boolean(enabled),
-      socialBarScript: typeof socialBarScript === 'string' ? socialBarScript.trim() : '',
-      popunderScript: typeof popunderScript === 'string' ? popunderScript.trim() : '',
-      smartlinkUrl: typeof smartlinkUrl === 'string' ? smartlinkUrl.trim() : '',
-      banner320x50Code: typeof banner320x50Code === 'string' ? banner320x50Code.trim() : '',
-      banner160x300Code: typeof banner160x300Code === 'string' ? banner160x300Code.trim() : '',
-    };
+    const nowIso = new Date().toISOString();
+    const nextDraft = normalizeAdSettings(
+      {
+        ...(req.body || {}),
+        status: 'draft',
+        updatedAt: nowIso,
+        updatedBy: user?.id || user?.email || 'admin',
+      },
+      'draft',
+    );
+    state.adDraftSettings = nextDraft;
     saveState();
-    res.json({ ok: true, adSettings: state.adSettings });
+    res.json({ ok: true, draftSettings: state.adDraftSettings });
   });
+
+  const handlePublishAdsRoute = async (req: Request, res: Response) => {
+    const user = await resolveAuthenticatedUser(req);
+    if (!hasStaffPermission(user, 'manage_stories') && !hasStaffPermission(user, 'manage_categories')) {
+      res.status(403).json({ error: 'Permission required to publish ad settings.' });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const currentVersion = Math.max(0, state.adSettings?.version || 0);
+    const nextVersion = currentVersion + 1;
+    const nextPublished = normalizeAdSettings(
+      {
+        ...(req.body || {}),
+        status: 'published',
+        version: nextVersion,
+        publishedAt: nowIso,
+        updatedAt: nowIso,
+        updatedBy: user?.id || user?.email || 'admin',
+      },
+      'published',
+    );
+    state.adSettings = nextPublished;
+    state.adDraftSettings = normalizeAdSettings(
+      { ...nextPublished, status: 'draft' },
+      'draft',
+    );
+    saveState();
+    res.json({
+      ok: true,
+      adSettings: state.adSettings,
+      draftSettings: state.adDraftSettings,
+    });
+  };
+
+  app.post('/api/admin/ads/publish', handlePublishAdsRoute);
+  app.post('/api/admin/ads', handlePublishAdsRoute);
 
   // ---------------------------------------------------------------------------
   // HERO BOX SELECTION ENDPOINT (Protected: Admin or Editor with manage_hero)
@@ -1024,14 +1072,11 @@ async function startServer() {
       nPassPriceInr: isOwnerAdmin
         ? state.nPassMonthlyPriceInr || NPASS_MONTHLY_PRICE_INR
         : undefined,
-      adSettings: state.adSettings || {
-        enabled: false,
-        socialBarScript: '',
-        popunderScript: '',
-        smartlinkUrl: '',
-        banner320x50Code: '',
-        banner160x300Code: '',
-      },
+      adSettings: normalizeAdSettings(state.adSettings, 'published'),
+      adDraftSettings: normalizeAdSettings(
+        state.adDraftSettings || state.adSettings,
+        'draft',
+      ),
     });
   });
 
@@ -1536,6 +1581,8 @@ Respond with strictly valid JSON in this exact structure:
   const distPath = path.resolve(process.cwd(), 'dist');
   const isProd = process.env.NODE_ENV === 'production' && fs.existsSync(distPath);
 
+  const httpServer = http.createServer(app);
+
   if (isProd) {
     app.use(express.static(distPath));
     app.get('*', (_req: Request, res: Response) => {
@@ -1544,13 +1591,17 @@ Respond with strictly valid JSON in this exact structure:
   } else {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer },
+        ws: { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Goppo Kahini platform running at http://0.0.0.0:${PORT}`);
   });
 }

@@ -32,6 +32,10 @@ import {
   X,
   Globe,
   Megaphone,
+  Laptop,
+  Smartphone,
+  Send,
+  Eye,
 } from 'lucide-react';
 import {
   signInWithEmailAndPassword,
@@ -47,12 +51,16 @@ import {
   isFirebaseStorageConfigured,
   uploadMediaFileToFirebaseStorage,
 } from '../firebase';
-import { collection, getDocs, doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, getDocs, doc, getDoc } from 'firebase/firestore';
 import {
   deleteEditorFromFirestore,
   deleteStoryFromFirestore,
   ensureBootstrappedAdminDoc,
+  fetchDraftAdsFromFirestore,
   fetchFirestoreDiagnostics,
+  fetchPublishedAdsFromFirestore,
+  publishAdSettingsToFirestore,
+  saveAdDraftToFirestore,
   syncCategoryToFirestore,
   syncEditorToFirestore,
   syncFullCatalogToFirestore,
@@ -63,7 +71,10 @@ import {
 import type {
   AccessPolicy,
   AdminPermission,
+  AdPageKey,
   AdSettings,
+  AdSlotKey,
+  AdTypeKey,
   CategoryConfig,
   ContentCategory,
   EditorGrant,
@@ -74,6 +85,7 @@ import type {
   StoryItem,
   UserProfile,
 } from '../types/content';
+import { createDefaultAdSettings, normalizeAdSettings } from '../utils/adConfig';
 import { ArtworkImage } from './ArtworkImage';
 
 const EDITOR_PERMISSION_LABELS: Array<{
@@ -164,20 +176,22 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     | 'editors_rbac'
   >('catalog');
 
-  const [adConfig, setAdConfig] = useState<AdSettings>(
-    adSettings || {
-      enabled: false,
-      socialBarScript: '',
-      popunderScript: '',
-      smartlinkUrl: '',
-      banner320x50Code: '',
-      banner160x300Code: '',
-    },
+  const [adConfig, setAdConfig] = useState<AdSettings>(() =>
+    adSettings
+      ? normalizeAdSettings({ ...adSettings, status: 'draft' }, 'draft')
+      : createDefaultAdSettings('draft'),
   );
+  const [publishedAdSnapshot, setPublishedAdSnapshot] = useState<AdSettings>(() =>
+    adSettings
+      ? normalizeAdSettings(adSettings, 'published')
+      : createDefaultAdSettings('published'),
+  );
+  const [selectedAdTypeTab, setSelectedAdTypeTab] = useState<AdTypeKey>('banner_320x50');
 
   useEffect(() => {
     if (adSettings) {
-      setAdConfig(adSettings);
+      const normalizedPublished = normalizeAdSettings(adSettings, 'published');
+      setPublishedAdSnapshot(normalizedPublished);
     }
   }, [adSettings]);
 
@@ -293,7 +307,14 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
         setAllUsers(data.users || []);
         setAllEditors(data.editors || []);
         if (data.nPassPriceInr) setCustomNPassPrice(data.nPassPriceInr);
-        if (data.adSettings) setAdConfig(data.adSettings);
+        if (data.adSettings) {
+          setPublishedAdSnapshot(normalizeAdSettings(data.adSettings, 'published'));
+        }
+        if (data.adDraftSettings || data.adSettings) {
+          setAdConfig(
+            normalizeAdSettings(data.adDraftSettings || data.adSettings, 'draft'),
+          );
+        }
         return;
       }
     } catch {
@@ -320,9 +341,17 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
           setCustomNPassPrice(settingsSnap.data().nPassMonthlyPriceInr);
         }
 
-        const adsSnap = await getDoc(doc(db, 'settings', 'ads'));
-        if (adsSnap.exists()) {
-          setAdConfig(adsSnap.data() as AdSettings);
+        const [draftFromFs, pubFromFs] = await Promise.all([
+          fetchDraftAdsFromFirestore(),
+          fetchPublishedAdsFromFirestore(),
+        ]);
+        if (pubFromFs) {
+          setPublishedAdSnapshot(pubFromFs);
+        }
+        if (draftFromFs) {
+          setAdConfig(draftFromFs);
+        } else if (pubFromFs) {
+          setAdConfig(normalizeAdSettings({ ...pubFromFs, status: 'draft' }, 'draft'));
         }
       } catch {
         // Non-blocking
@@ -330,42 +359,122 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     }
   };
 
-  const handleSaveAds = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSaveAdDraft = async () => {
     setBusy(true);
     try {
+      let savedDraft = normalizeAdSettings(
+        { ...adConfig, status: 'draft', updatedAt: new Date().toISOString() },
+        'draft',
+      );
+
       if (authToken) {
-        await fetch('/api/admin/ads', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify(adConfig),
-        });
-      }
-      if (db && auth?.currentUser) {
         try {
-          await setDoc(doc(db, 'settings', 'ads'), {
-            ...adConfig,
-            updatedAt: serverTimestamp(),
+          const res = await fetch('/api/admin/ads/draft', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${authToken}`,
+            },
+            body: JSON.stringify(savedDraft),
           });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.draftSettings) {
+              savedDraft = normalizeAdSettings(data.draftSettings, 'draft');
+            }
+          }
         } catch {
-          // ignore
+          // Static fallback continues to Firestore
         }
       }
-      try {
-        localStorage.setItem('goppo_kahini_ads', JSON.stringify(adConfig));
-      } catch {}
-      if (onAdSettingsUpdated) {
-        onAdSettingsUpdated(adConfig);
+
+      if (isFirebaseConfigured && db && auth?.currentUser) {
+        savedDraft = await saveAdDraftToFirestore(savedDraft);
       }
-      setStatusBanner('বিজ্ঞাপন ও স্লট সেটিংস সফলভাবে সংরক্ষিত ও লাইভ হয়েছে!');
-    } catch {
-      setStatusBanner('বিজ্ঞাপন সেটিংস সংরক্ষণ করতে ত্রুটি হয়েছে।');
+
+      setAdConfig(savedDraft);
+      setStatusBanner(
+        'বিজ্ঞাপনের খসড়া (Draft) নিরাপদে সংরক্ষিত হয়েছে! লাইভ করতে "প্রকাশ করুন" বাটনে ক্লিক করুন।',
+      );
+    } catch (err) {
+      setStatusBanner(
+        err instanceof Error
+          ? `খসড়া সংরক্ষণ ত্রুটি: ${err.message.slice(0, 120)}`
+          : 'খসড়া সংরক্ষণ করতে ত্রুটি হয়েছে।',
+      );
     } finally {
       setBusy(false);
     }
+  };
+
+  const handlePublishAds = async (overrideConfig?: AdSettings) => {
+    setBusy(true);
+    try {
+      const targetConfig = normalizeAdSettings(overrideConfig || adConfig, 'published');
+      let nextPublished: AdSettings = {
+        ...targetConfig,
+        status: 'published',
+        version: Math.max(1, (publishedAdSnapshot.version || 0) + 1),
+        publishedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (authToken) {
+        try {
+          const res = await fetch('/api/admin/ads/publish', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${authToken}`,
+            },
+            body: JSON.stringify(targetConfig),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.adSettings) {
+              nextPublished = normalizeAdSettings(data.adSettings, 'published');
+            }
+          }
+        } catch {
+          // Continue with Firestore publish
+        }
+      }
+
+      if (isFirebaseConfigured && db && auth?.currentUser) {
+        nextPublished = await publishAdSettingsToFirestore({
+          ...nextPublished,
+          version: Math.max(publishedAdSnapshot.version || 0, targetConfig.version || 0),
+        });
+      }
+
+      try {
+        localStorage.setItem('goppo_kahini_ads', JSON.stringify(nextPublished));
+      } catch {}
+
+      setPublishedAdSnapshot(nextPublished);
+      setAdConfig(normalizeAdSettings({ ...nextPublished, status: 'draft' }, 'draft'));
+      if (onAdSettingsUpdated) {
+        onAdSettingsUpdated(nextPublished);
+      }
+      setStatusBanner(
+        nextPublished.enabled
+          ? `বিজ্ঞাপন সেটিংস (v${nextPublished.version}) সফলভাবে প্রকাশিত ও ওয়েবসাইট/PWA-তে লাইভ হয়েছে!`
+          : `সমস্ত বিজ্ঞাপন ওয়েবসাইট ও PWA থেকে বন্ধ (Disable) করে প্রকাশ করা হয়েছে (v${nextPublished.version})।`,
+      );
+    } catch (err) {
+      setStatusBanner(
+        err instanceof Error
+          ? `বিজ্ঞাপন প্রকাশ করতে ত্রুটি: ${err.message.slice(0, 120)}`
+          : 'বিজ্ঞাপন প্রকাশ করতে ত্রুটি হয়েছে।',
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveAds = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await handlePublishAds();
   };
 
   useEffect(() => {
@@ -2516,228 +2625,708 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       )}
 
       {/* TAB: AD MONETIZATION & SLOTS SETTINGS */}
-      {effectiveTab === 'ad_management' && (isOwnerAdmin || hasPermission('manage_categories') || hasPermission('manage_stories')) && (
-        <form onSubmit={handleSaveAds} className="space-y-6">
-          {/* Header Card */}
-          <div className="p-6 rounded-2xl bg-gradient-to-b from-[#18131B] via-[#120F16] to-[#0A090C] border border-white/[0.08] shadow-xl">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <div className="w-9 h-9 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-center text-[#EF4444]">
-                    <Megaphone className="h-5 w-5" />
+      {effectiveTab === 'ad_management' &&
+        (isOwnerAdmin || hasPermission('manage_categories') || hasPermission('manage_stories')) && (
+          <form onSubmit={handleSaveAds} className="space-y-6">
+            {/* Header + Draft/Published Status Card */}
+            <div className="p-6 rounded-2xl bg-gradient-to-b from-[#18131B] via-[#120F16] to-[#0A090C] border border-white/[0.08] shadow-xl space-y-4">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-10 h-10 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-center text-[#EF4444]">
+                      <Megaphone className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h2 className="font-editorial text-xl font-bold text-[#F5F2EB]">
+                        বিজ্ঞাপন ব্যবস্থাপনা স্টুডিও (Web + PWA Live Sync)
+                      </h2>
+                      <p className="text-xs text-[#A69E95]">
+                        খসড়া সংরক্ষণ (Draft) ও লাইভ প্রকাশ (Publish) · ডেস্কটপ, মোবাইল ও PWA-তে তাৎক্ষণিক আপডেট
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <h2 className="font-editorial text-xl font-bold text-[#F5F2EB]">
-                      বিজ্ঞাপন ও স্লট সেটিংস (Ad Monetization)
-                    </h2>
-                    <p className="text-xs text-[#A69E95]">
-                      সোশ্যাল বার, পপএন্ডার, স্মার্টলিঙ্ক এবং ব্যানার বিজ্ঞাপন কোড পরিচালনা করুন
-                    </p>
+                </div>
+
+                {/* Master Switch + Quick Kill Switch */}
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-2.5 p-2.5 rounded-xl bg-[#0B090E] border border-white/[0.08]">
+                    <span className="text-xs font-medium text-[#F5F2EB]">সিস্টেম স্ট্যাটাস:</span>
+                    <button
+                      type="button"
+                      onClick={() => setAdConfig((prev) => ({ ...prev, enabled: !prev.enabled }))}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                        adConfig.enabled
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          : 'bg-red-500/15 text-red-300 border border-red-500/30'
+                      }`}
+                    >
+                      {adConfig.enabled ? (
+                        <>
+                          <ToggleRight className="h-4 w-4 text-emerald-400" />
+                          <span>বিজ্ঞাপন চালু (ON)</span>
+                        </>
+                      ) : (
+                        <>
+                          <ToggleLeft className="h-4 w-4 text-red-400" />
+                          <span>বিজ্ঞাপন বন্ধ (OFF)</span>
+                        </>
+                      )}
+                    </button>
                   </div>
+
+                  {publishedAdSnapshot.enabled && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        const offState = { ...adConfig, enabled: false };
+                        setAdConfig(offState);
+                        void handlePublishAds(offState);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-red-600/20 hover:bg-red-600/35 border border-red-500/35 text-xs font-semibold text-red-200 cursor-pointer transition-all"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      <span>এখনই সব বিজ্ঞাপন বন্ধ করুন</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {/* Master Switch */}
-              <div className="flex items-center gap-3 p-3 rounded-xl bg-[#0B090E] border border-white/[0.08]">
-                <span className="text-xs font-medium text-[#F5F2EB]">বিজ্ঞাপন প্রদর্শন:</span>
+              {/* Draft vs Published Live Status Strip */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                <div className="p-3.5 rounded-xl bg-[#0B090E] border border-white/[0.08] flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <span className="text-[11px] uppercase tracking-wider text-[#A69E95]">
+                      Published Live (ওয়েবসাইট + PWA)
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`inline-flex items-center gap-1 text-xs font-bold ${
+                          publishedAdSnapshot.enabled ? 'text-emerald-400' : 'text-amber-300'
+                        }`}
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        {publishedAdSnapshot.enabled
+                          ? `লাইভ চলছে (v${publishedAdSnapshot.version || 1})`
+                          : `বর্তমানে বন্ধ আছে (v${publishedAdSnapshot.version || 1})`}
+                      </span>
+                    </div>
+                  </div>
+                  <span className="text-[11px] font-mono-num text-[#9E968F]">
+                    {publishedAdSnapshot.publishedAt
+                      ? new Date(publishedAdSnapshot.publishedAt).toLocaleString('bn-BD')
+                      : 'অপ্রকাশিত'}
+                  </span>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-emerald-500/[0.07] border border-emerald-500/20 flex items-start gap-2.5">
+                  <Shield className="h-4 w-4 text-emerald-400 mt-0.5 shrink-0" />
+                  <p className="text-xs text-emerald-200/90 leading-relaxed">
+                    <span className="font-semibold text-emerald-300">Ad-Free গ্রাহক সুরক্ষা:</span> ₹৯ টিকিট ক্রেতা ও অ্যাক্টিভ মেম্বারদের জন্য সাইট সম্পূর্ণ বিজ্ঞাপনমুক্ত থাকবে।
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Device + Page + Slot Targeting Controls */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+              {/* 1. Device Targeting */}
+              <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] to-[#0B090E] border border-white/[0.08] space-y-3">
+                <h3 className="text-sm font-bold text-[#F5F2EB] flex items-center gap-2">
+                  <Laptop className="h-4 w-4 text-[#EF4444]" />
+                  <span>ডিভাইস নিয়ন্ত্রণ (Desktop / Mobile)</span>
+                </h3>
+                <p className="text-[11px] text-[#A69E95]">
+                  কম্পিউটার এবং মোবাইল/PWA-র জন্য বিজ্ঞাপন চালু বা বন্ধ করুন:
+                </p>
+                <div className="space-y-2">
+                  <label className="flex items-center justify-between p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.07] cursor-pointer">
+                    <span className="flex items-center gap-2 text-xs font-medium text-[#F5F2EB]">
+                      <Laptop className="h-4 w-4 text-blue-400" />
+                      <span>কম্পিউটার / ডেস্কটপ (Desktop)</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={adConfig.devices?.desktop ?? true}
+                      onChange={(e) =>
+                        setAdConfig((prev) => ({
+                          ...prev,
+                          devices: { ...prev.devices, desktop: e.target.checked },
+                        }))
+                      }
+                      className="h-4 w-4 accent-[#EF4444] cursor-pointer"
+                    />
+                  </label>
+                  <label className="flex items-center justify-between p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.07] cursor-pointer">
+                    <span className="flex items-center gap-2 text-xs font-medium text-[#F5F2EB]">
+                      <Smartphone className="h-4 w-4 text-emerald-400" />
+                      <span>মোবাইল ব্রাউজার ও PWA (Mobile)</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={adConfig.devices?.mobile ?? true}
+                      onChange={(e) =>
+                        setAdConfig((prev) => ({
+                          ...prev,
+                          devices: { ...prev.devices, mobile: e.target.checked },
+                        }))
+                      }
+                      className="h-4 w-4 accent-[#EF4444] cursor-pointer"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              {/* 2. Page Controls */}
+              <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] to-[#0B090E] border border-white/[0.08] space-y-3">
+                <h3 className="text-sm font-bold text-[#F5F2EB] flex items-center gap-2">
+                  <Eye className="h-4 w-4 text-[#EF4444]" />
+                  <span>পৃষ্ঠা নিয়ন্ত্রণ (Page Selection)</span>
+                </h3>
+                <p className="text-[11px] text-[#A69E95]">
+                  কোন কোন পৃষ্ঠায় বিজ্ঞাপন দেখানো হবে নির্বাচন করুন:
+                </p>
+                <div className="grid grid-cols-1 gap-2">
+                  {(
+                    [
+                      { key: 'home', label: 'হোমপেজ (Homepage)' },
+                      { key: 'catalog', label: 'গল্পের তালিকা / ক্যাটালগ পৃষ্ঠা' },
+                      { key: 'story_details', label: 'গল্পের বিবরণ ও ট্রেলার পৃষ্ঠা' },
+                      { key: 'player', label: 'অডিও / ভিডিও প্লেয়ার' },
+                    ] as const
+                  ).map((pg) => (
+                    <label
+                      key={pg.key}
+                      className="flex items-center justify-between px-3 py-2 rounded-xl bg-white/[0.03] border border-white/[0.07] cursor-pointer"
+                    >
+                      <span className="text-xs font-medium text-[#F5F2EB]">{pg.label}</span>
+                      <input
+                        type="checkbox"
+                        checked={adConfig.pages?.[pg.key as AdPageKey] ?? true}
+                        onChange={(e) =>
+                          setAdConfig((prev) => ({
+                            ...prev,
+                            pages: { ...prev.pages, [pg.key]: e.target.checked },
+                          }))
+                        }
+                        className="h-4 w-4 accent-[#EF4444] cursor-pointer"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* 3. Slot Controls */}
+              <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] to-[#0B090E] border border-white/[0.08] space-y-3">
+                <h3 className="text-sm font-bold text-[#F5F2EB] flex items-center gap-2">
+                  <Sparkles className="h-4 w-4 text-[#EF4444]" />
+                  <span>অবস্থান ও স্লট (Banner Positions)</span>
+                </h3>
+                <p className="text-[11px] text-[#A69E95]">
+                  ৩২০x৫০ ও নেটিভ ব্যানার কোন অবস্থানে দেখাবে:
+                </p>
+                <div className="grid grid-cols-1 gap-1.5 max-h-44 overflow-y-auto pr-1">
+                  {(
+                    [
+                      { key: 'home_top', label: 'হোমপেজ ১ — উপরের অংশ (Hero-র নিচে)' },
+                      { key: 'home_middle', label: 'হোমপেজ ২ — মাঝের অংশ (র‍্যাকের মাঝে)' },
+                      { key: 'home_bottom', label: 'হোমপেজ ৩ — নিচের অংশ (ফুটারের আগে)' },
+                      { key: 'catalog_inline', label: 'গল্পের তালিকা পৃষ্ঠার মধ্যে' },
+                      { key: 'story_details_top', label: 'গল্পের বিবরণ — ট্রেলারের ঠিক নিচে' },
+                      { key: 'story_details_bottom', label: 'গল্পের বিবরণ — এপিসোডের পাশে/নিচে' },
+                      { key: 'player_banner', label: 'ট্রেলার ও ফ্রি প্লেয়ার ব্যানার' },
+                    ] as const
+                  ).map((sl) => (
+                    <label
+                      key={sl.key}
+                      className="flex items-center justify-between px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/[0.06] cursor-pointer"
+                    >
+                      <span className="text-[11px] font-medium text-[#F5F2EB]">{sl.label}</span>
+                      <input
+                        type="checkbox"
+                        checked={adConfig.slots?.[sl.key as AdSlotKey] ?? true}
+                        onChange={(e) =>
+                          setAdConfig((prev) => ({
+                            ...prev,
+                            slots: { ...prev.slots, [sl.key]: e.target.checked },
+                          }))
+                        }
+                        className="h-3.5 w-3.5 accent-[#EF4444] cursor-pointer"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Ad Format Selector Tabs */}
+            <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] via-[#100D14] to-[#09080B] border border-white/[0.08] shadow-xl space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-3">
+                <h3 className="font-editorial text-lg font-bold text-[#F5F2EB]">
+                  বিজ্ঞাপনের ধরন নির্বাচন ও কোড যুক্ত / পরিবর্তন / মুছুন
+                </h3>
+                <div className="flex flex-wrap gap-2">
+                  {(
+                    [
+                      { id: 'banner_320x50', label: 'ব্যানার 320×50' },
+                      { id: 'native_ad', label: 'নেটিভ বিজ্ঞাপন (Native)' },
+                      { id: 'social_bar', label: 'সোশ্যাল বার' },
+                      { id: 'banner_160x300', label: 'ব্যানার 160×300' },
+                      { id: 'popunder', label: 'পপএন্ডার' },
+                      { id: 'smartlink', label: 'স্মার্টলিঙ্ক' },
+                    ] as const
+                  ).map((tab) => {
+                    const isActive = selectedAdTypeTab === tab.id;
+                    const typeEnabled = adConfig.enabledTypes?.[tab.id]?.enabled ?? true;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setSelectedAdTypeTab(tab.id)}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                          isActive
+                            ? 'bg-gradient-to-r from-[#DC2626] to-[#EF4444] text-white shadow-md'
+                            : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#C8BFB5] border border-white/[0.08]'
+                        }`}
+                      >
+                        <span
+                          className={`h-2 w-2 rounded-full ${
+                            typeEnabled ? 'bg-emerald-400' : 'bg-gray-500'
+                          }`}
+                        />
+                        <span>{tab.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Per-Format Device & Enable Controls + Code Editor */}
+              {(() => {
+                const ctrl = adConfig.enabledTypes[selectedAdTypeTab] || {
+                  enabled: true,
+                  desktop: true,
+                  mobile: true,
+                };
+                const updateFormatCtrl = (patch: Partial<typeof ctrl>) => {
+                  setAdConfig((prev) => ({
+                    ...prev,
+                    enabledTypes: {
+                      ...prev.enabledTypes,
+                      [selectedAdTypeTab]: { ...ctrl, ...patch },
+                    },
+                  }));
+                };
+
+                return (
+                  <div className="space-y-4">
+                    {/* Controls Bar for Selected Ad Type */}
+                    <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-xl bg-[#0B090E] border border-white/[0.08]">
+                      <div className="flex flex-wrap items-center gap-4">
+                        <label className="inline-flex items-center gap-2 text-xs font-semibold text-[#F5F2EB] cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={ctrl.enabled}
+                            onChange={(e) => updateFormatCtrl({ enabled: e.target.checked })}
+                            className="h-4 w-4 accent-emerald-500 cursor-pointer"
+                          />
+                          <span>এই বিজ্ঞাপন ধরনটি চালু রাখুন</span>
+                        </label>
+                        <label className="inline-flex items-center gap-1.5 text-xs text-[#C8BFB5] cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={ctrl.desktop}
+                            onChange={(e) => updateFormatCtrl({ desktop: e.target.checked })}
+                            className="h-4 w-4 accent-[#EF4444] cursor-pointer"
+                          />
+                          <Laptop className="h-3.5 w-3.5 text-blue-400" />
+                          <span>কম্পিউটার</span>
+                        </label>
+                        <label className="inline-flex items-center gap-1.5 text-xs text-[#C8BFB5] cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={ctrl.mobile}
+                            onChange={(e) => updateFormatCtrl({ mobile: e.target.checked })}
+                            className="h-4 w-4 accent-[#EF4444] cursor-pointer"
+                          />
+                          <Smartphone className="h-3.5 w-3.5 text-emerald-400" />
+                          <span>মোবাইল / PWA</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    {/* BANNER 320x50 */}
+                    {selectedAdTypeTab === 'banner_320x50' && (
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs font-bold text-[#F5F2EB]">
+                              ব্যানার ৩২০×৫০ কোড (মোবাইল ও সার্বজনীন)
+                            </label>
+                            {adConfig.banner320x50Code && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAdConfig((prev) => ({ ...prev, banner320x50Code: '' }))
+                                }
+                                className="inline-flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 cursor-pointer"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                <span>কোড মুছুন</span>
+                              </button>
+                            )}
+                          </div>
+                          <textarea
+                            rows={5}
+                            value={adConfig.banner320x50Code || ''}
+                            onChange={(e) =>
+                              setAdConfig((prev) => ({ ...prev, banner320x50Code: e.target.value }))
+                            }
+                            placeholder="<script>...</script> — হোমপেজের ৩টি স্থানে, গল্পের পেজে ও ট্রেলার প্লেয়ারে দেখাবে"
+                            className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs font-bold text-[#F5F2EB]">
+                              কম্পিউটারের জন্য আলাদা ব্যানার কোড (ঐচ্ছিক)
+                            </label>
+                            {adConfig.banner320x50DesktopCode && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAdConfig((prev) => ({
+                                    ...prev,
+                                    banner320x50DesktopCode: '',
+                                  }))
+                                }
+                                className="inline-flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 cursor-pointer"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                <span>কোড মুছুন</span>
+                              </button>
+                            )}
+                          </div>
+                          <textarea
+                            rows={5}
+                            value={adConfig.banner320x50DesktopCode || ''}
+                            onChange={(e) =>
+                              setAdConfig((prev) => ({
+                                ...prev,
+                                banner320x50DesktopCode: e.target.value,
+                              }))
+                            }
+                            placeholder="খালি রাখলে কম্পিউটারেও উপরের ৩২০×৫০ ব্যানারটি দেখাবে; ভিন্ন কোড দিতে চাইলে এখানে পেস্ট করুন"
+                            className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* NATIVE AD */}
+                    {selectedAdTypeTab === 'native_ad' && (
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs font-bold text-[#F5F2EB]">
+                              নেটিভ বিজ্ঞাপন কোড (ডেস্কটপ ও সার্বজনীন)
+                            </label>
+                            {adConfig.nativeAdCode && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAdConfig((prev) => ({ ...prev, nativeAdCode: '' }))
+                                }
+                                className="inline-flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 cursor-pointer"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                <span>কোড মুছুন</span>
+                              </button>
+                            )}
+                          </div>
+                          <textarea
+                            rows={5}
+                            value={adConfig.nativeAdCode || ''}
+                            onChange={(e) =>
+                              setAdConfig((prev) => ({ ...prev, nativeAdCode: e.target.value }))
+                            }
+                            placeholder="<script async src='...'></script><div id='container-...'></div>"
+                            className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs font-bold text-[#F5F2EB]">
+                              মোবাইল / PWA নেটিভ কোড (ঐচ্ছিক)
+                            </label>
+                            {adConfig.nativeAdMobileCode && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAdConfig((prev) => ({ ...prev, nativeAdMobileCode: '' }))
+                                }
+                                className="inline-flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 cursor-pointer"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                <span>কোড মুছুন</span>
+                              </button>
+                            )}
+                          </div>
+                          <textarea
+                            rows={5}
+                            value={adConfig.nativeAdMobileCode || ''}
+                            onChange={(e) =>
+                              setAdConfig((prev) => ({
+                                ...prev,
+                                nativeAdMobileCode: e.target.value,
+                              }))
+                            }
+                            placeholder="খালি রাখলে মোবাইলেও উপরের নেটিভ কোডটি ব্যবহার হবে"
+                            className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* SOCIAL BAR */}
+                    {selectedAdTypeTab === 'social_bar' && (
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs font-bold text-[#F5F2EB]">
+                              সোশ্যাল বার স্ক্রিপ্ট (সার্বজনীন / ডেস্কটপ)
+                            </label>
+                            {adConfig.socialBarScript && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAdConfig((prev) => ({ ...prev, socialBarScript: '' }))
+                                }
+                                className="inline-flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 cursor-pointer"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                <span>কোড মুছুন</span>
+                              </button>
+                            )}
+                          </div>
+                          <textarea
+                            rows={5}
+                            value={adConfig.socialBarScript || ''}
+                            onChange={(e) =>
+                              setAdConfig((prev) => ({ ...prev, socialBarScript: e.target.value }))
+                            }
+                            placeholder="<script type='text/javascript' src='//...social-bar.js'></script>"
+                            className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs font-bold text-[#F5F2EB]">
+                              মোবাইল / PWA সোশ্যাল বার স্ক্রিপ্ট (ঐচ্ছিক)
+                            </label>
+                            {adConfig.socialBarMobileScript && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAdConfig((prev) => ({ ...prev, socialBarMobileScript: '' }))
+                                }
+                                className="inline-flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 cursor-pointer"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                <span>কোড মুছুন</span>
+                              </button>
+                            )}
+                          </div>
+                          <textarea
+                            rows={5}
+                            value={adConfig.socialBarMobileScript || ''}
+                            onChange={(e) =>
+                              setAdConfig((prev) => ({
+                                ...prev,
+                                socialBarMobileScript: e.target.value,
+                              }))
+                            }
+                            placeholder="খালি রাখলে মোবাইল ও PWA-তেও উপরের সোশ্যাল বার স্ক্রিপ্ট ব্যবহার হবে"
+                            className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* BANNER 160x300 */}
+                    {selectedAdTypeTab === 'banner_160x300' && (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs font-bold text-[#F5F2EB]">
+                            ব্যানার ১৬০×৩০০ কোড (Vertical Skyscraper)
+                          </label>
+                          {adConfig.banner160x300Code && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setAdConfig((prev) => ({ ...prev, banner160x300Code: '' }))
+                              }
+                              className="inline-flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 cursor-pointer"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                              <span>কোড মুছুন</span>
+                            </button>
+                          )}
+                        </div>
+                        <textarea
+                          rows={5}
+                          value={adConfig.banner160x300Code || ''}
+                          onChange={(e) =>
+                            setAdConfig((prev) => ({ ...prev, banner160x300Code: e.target.value }))
+                          }
+                          placeholder="<!-- 160x300 Vertical Banner Code -->"
+                          className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+                        />
+                      </div>
+                    )}
+
+                    {/* POPUNDER */}
+                    {selectedAdTypeTab === 'popunder' && (
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs font-bold text-[#F5F2EB]">
+                              পপএন্ডার স্ক্রিপ্ট (সার্বজনীন / ডেস্কটপ)
+                            </label>
+                            {adConfig.popunderScript && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAdConfig((prev) => ({ ...prev, popunderScript: '' }))
+                                }
+                                className="inline-flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 cursor-pointer"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                <span>কোড মুছুন</span>
+                              </button>
+                            )}
+                          </div>
+                          <textarea
+                            rows={5}
+                            value={adConfig.popunderScript || ''}
+                            onChange={(e) =>
+                              setAdConfig((prev) => ({ ...prev, popunderScript: e.target.value }))
+                            }
+                            placeholder="<script type='text/javascript' src='//...popunder.js'></script>"
+                            className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs font-bold text-[#F5F2EB]">
+                              মোবাইল পপএন্ডার স্ক্রিপ্ট (ঐচ্ছিক)
+                            </label>
+                            {adConfig.popunderMobileScript && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAdConfig((prev) => ({ ...prev, popunderMobileScript: '' }))
+                                }
+                                className="inline-flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 cursor-pointer"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                <span>কোড মুছুন</span>
+                              </button>
+                            )}
+                          </div>
+                          <textarea
+                            rows={5}
+                            value={adConfig.popunderMobileScript || ''}
+                            onChange={(e) =>
+                              setAdConfig((prev) => ({
+                                ...prev,
+                                popunderMobileScript: e.target.value,
+                              }))
+                            }
+                            placeholder="খালি রাখলে মোবাইলেও উপরের পপএন্ডার স্ক্রিপ্ট চলবে"
+                            className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* SMARTLINK */}
+                    {selectedAdTypeTab === 'smartlink' && (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs font-bold text-[#F5F2EB]">
+                            স্মার্টলিঙ্ক / ডাইরেক্ট অফার URL
+                          </label>
+                          {adConfig.smartlinkUrl && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setAdConfig((prev) => ({ ...prev, smartlinkUrl: '' }))
+                              }
+                              className="inline-flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 cursor-pointer"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                              <span>লিংক মুছুন</span>
+                            </button>
+                          )}
+                        </div>
+                        <input
+                          type="url"
+                          value={adConfig.smartlinkUrl || ''}
+                          onChange={(e) =>
+                            setAdConfig((prev) => ({ ...prev, smartlinkUrl: e.target.value }))
+                          }
+                          placeholder="https://..."
+                          className="w-full h-11 px-3.5 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
+                        />
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Dual Action Bar: Save Draft vs Publish Live */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 p-4 rounded-2xl bg-[#120F16] border border-white/[0.08]">
+              <p className="text-xs text-[#A69E95]">
+                প্রথমে <strong className="text-[#F5F2EB]">খসড়া সংরক্ষণ</strong> করে পরীক্ষা করতে পারেন, অথবা সরাসরি <strong className="text-red-400">বিজ্ঞাপন প্রকাশ</strong> করে সব ডিভাইসে লাইভ করুন।
+              </p>
+              <div className="flex flex-wrap items-center justify-end gap-3">
                 <button
                   type="button"
-                  onClick={() => setAdConfig((prev) => ({ ...prev, enabled: !prev.enabled }))}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                    adConfig.enabled
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                      : 'bg-white/[0.06] text-[#A69E95] border border-white/[0.08]'
-                  }`}
+                  disabled={busy}
+                  onClick={handleSaveAdDraft}
+                  className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.12] text-[#F5F2EB] font-semibold text-xs sm:text-sm cursor-pointer transition-all disabled:opacity-50"
                 >
-                  {adConfig.enabled ? (
+                  <Save className="h-4 w-4 text-amber-400" />
+                  <span>খসড়া সংরক্ষণ (Save Draft)</span>
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-[#DC2626] to-[#EF4444] text-white font-semibold text-xs sm:text-sm cursor-pointer shadow-lg shadow-red-950/40 hover:brightness-110 transition-all disabled:opacity-50"
+                >
+                  {busy ? (
                     <>
-                      <ToggleRight className="h-4 w-4 text-emerald-400" />
-                      <span>সক্রিয় (Enabled)</span>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <span>প্রকাশ হচ্ছে...</span>
                     </>
                   ) : (
                     <>
-                      <ToggleLeft className="h-4 w-4 text-[#A69E95]" />
-                      <span>নিষ্ক্রিয় (Disabled)</span>
+                      <Send className="h-4 w-4" />
+                      <span>বিজ্ঞাপন প্রকাশ করুন (Publish Live)</span>
                     </>
                   )}
                 </button>
               </div>
             </div>
-
-            {/* Ad-Free Listener Protection Notice */}
-            <div className="mt-4 p-3.5 rounded-xl bg-emerald-500/[0.08] border border-emerald-500/20 flex items-start gap-2.5">
-              <Shield className="h-4 w-4 text-emerald-400 mt-0.5 shrink-0" />
-              <div className="text-xs text-emerald-200/90 leading-relaxed">
-                <span className="font-semibold text-emerald-300">প্রিমিয়াম সুরক্ষানীতি:</span> যে সকল শ্রোতা ₹৯ দিয়ে টিকেট কেটেছেন বা সক্রিয় অ্যাক্সেস পেয়েছেন, তাদের জন্য ওয়েবসাইটটি সম্পূর্ণ বিজ্ঞাপনহীন (100% Ad-Free) থাকবে। বিজ্ঞাপন শুধুমাত্র ফ্রি ব্যবহারকারীদের জন্য প্রদর্শিত হবে।
-              </div>
-            </div>
-          </div>
-
-          {/* Ad Formats Grid */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* 1. সোশ্যাল বার (Social Bar) */}
-            <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] via-[#100D14] to-[#09080B] border border-white/[0.08] shadow-xl space-y-3">
-              <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
-                <div className="flex items-center gap-2">
-                  <div className="w-7 h-7 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
-                    <Megaphone className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-[#F5F2EB]">১. সোশ্যাল বার (Social Bar)</h3>
-                    <p className="text-[11px] text-[#A69E95]">ইন-পেজ পুশ নোটিফিকেশন বার</p>
-                  </div>
-                </div>
-                <span className="text-[10px] px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 font-mono-num">
-                  In-Page Push
-                </span>
-              </div>
-              <p className="text-xs text-[#A69E95] leading-relaxed">
-                Adsterra বা অন্যান্য নেটওয়ার্কের সোশ্যাল বার স্ক্রিপ্ট ট্যাগ এখানে পেস্ট করুন। এটি ভিজিটরদের স্ক্রিনের নিচে বা পাশে মসৃণ নোটিফিকেশন আকারে প্রদর্শন করবে।
-              </p>
-              <textarea
-                rows={4}
-                value={adConfig.socialBarScript || ''}
-                onChange={(e) => setAdConfig((prev) => ({ ...prev, socialBarScript: e.target.value }))}
-                placeholder="<script type='text/javascript' src='//...your-social-bar.js'></script>"
-                className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
-              />
-            </div>
-
-            {/* 2. পপএন্ডার (Popunder) */}
-            <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] via-[#100D14] to-[#09080B] border border-white/[0.08] shadow-xl space-y-3">
-              <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
-                <div className="flex items-center gap-2">
-                  <div className="w-7 h-7 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
-                    <ExternalLink className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-[#F5F2EB]">২. পপএন্ডার (Popunder)</h3>
-                    <p className="text-[11px] text-[#A69E95]">অন-ক্লিক ব্যাকগ্রাউন্ড পপ উইন্ডো</p>
-                  </div>
-                </div>
-                <span className="text-[10px] px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 font-mono-num">
-                  On-Click Pop
-                </span>
-              </div>
-              <p className="text-xs text-[#A69E95] leading-relaxed">
-                পপএন্ডার স্ক্রিপ্ট কোডটি এখানে পেস্ট করুন। ফ্রি ইউজাররা সাইটে প্রথমবার কোনো স্টোরি বা বাটনে ক্লিক করলে নতুন ব্যাকগ্রাউন্ড ট্যাবে বিজ্ঞাপনটি ওপেন হবে।
-              </p>
-              <textarea
-                rows={4}
-                value={adConfig.popunderScript || ''}
-                onChange={(e) => setAdConfig((prev) => ({ ...prev, popunderScript: e.target.value }))}
-                placeholder="<script type='text/javascript' src='//...your-popunder.js'></script>"
-                className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
-              />
-            </div>
-
-            {/* 3. স্মার্টলিঙ্ক (Smartlink URL) */}
-            <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] via-[#100D14] to-[#09080B] border border-white/[0.08] shadow-xl space-y-3">
-              <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
-                <div className="flex items-center gap-2">
-                  <div className="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
-                    <Globe className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-[#F5F2EB]">৩. স্মার্টলিঙ্ক (Smartlink)</h3>
-                    <p className="text-[11px] text-[#A69E95]">ডাইরেক্ট রিডাইরেক্ট অফার লিংক</p>
-                  </div>
-                </div>
-                <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 font-mono-num">
-                  Direct URL
-                </span>
-              </div>
-              <p className="text-xs text-[#A69E95] leading-relaxed">
-                আপনার স্মার্টলিঙ্ক/ডাইরেক্ট লিংক ইউআরএল দিন। হোমপেজের ক্যাটালগ ফিল্টারের পাশে এবং অডিও পেজে স্পনসরড অফার বাটন হিসেবে প্রদর্শিত হবে।
-              </p>
-              <input
-                type="url"
-                value={adConfig.smartlinkUrl || ''}
-                onChange={(e) => setAdConfig((prev) => ({ ...prev, smartlinkUrl: e.target.value }))}
-                placeholder="https://..."
-                className="w-full h-11 px-3.5 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
-              />
-            </div>
-
-            {/* 4. ব্যানার ৩২০x৫০ (Mobile / Desktop Banner 320x50) */}
-            <div className="p-5 rounded-2xl bg-gradient-to-b from-[#16131A] via-[#100D14] to-[#09080B] border border-white/[0.08] shadow-xl space-y-3">
-              <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
-                <div className="flex items-center gap-2">
-                  <div className="w-7 h-7 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400">
-                    <Film className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-[#F5F2EB]">৪. ব্যানার ৩২০x৫০ (Banner 320x50)</h3>
-                    <p className="text-[11px] text-[#A69E95]">হোম র‍্যাক, অডিও প্লেয়ার ও স্টোরি ডিটেইলসে</p>
-                  </div>
-                </div>
-                <span className="text-[10px] px-2 py-0.5 rounded bg-red-500/10 text-red-300 border border-red-500/20 font-mono-num">
-                  320x50
-                </span>
-              </div>
-              <p className="text-xs text-[#A69E95] leading-relaxed">
-                ৩২০x৫০ ব্যানার কোড (script / iframe ট্যাগ)। হোমপেজে গল্প ক্যাটাগরির মাঝে, অডিও প্লেয়ারের ওপর এবং স্টোরি ডিটেইলস পেজের এপিসোড সেকশনের উপরে প্রদর্শিত হবে।
-              </p>
-              <textarea
-                rows={4}
-                value={adConfig.banner320x50Code || ''}
-                onChange={(e) => setAdConfig((prev) => ({ ...prev, banner320x50Code: e.target.value }))}
-                placeholder="<!-- 320x50 Banner Code -->"
-                className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
-              />
-            </div>
-
-            {/* 5. ব্যানার ১৬০x৩০০ (Vertical Skyscraper Banner 160x300) */}
-            <div className="lg:col-span-2 p-5 rounded-2xl bg-gradient-to-b from-[#16131A] via-[#100D14] to-[#09080B] border border-white/[0.08] shadow-xl space-y-3">
-              <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
-                <div className="flex items-center gap-2">
-                  <div className="w-7 h-7 rounded-lg bg-teal-500/10 border border-teal-500/20 flex items-center justify-center text-teal-400">
-                    <Film className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-[#F5F2EB]">৫. ব্যানার ১৬০x৩০০ (Vertical Banner 160x300)</h3>
-                    <p className="text-[11px] text-[#A69E95]">সাইড কলাম ও লার্জ স্ক্রিন সাইডবার স্লট</p>
-                  </div>
-                </div>
-                <span className="text-[10px] px-2 py-0.5 rounded bg-teal-500/10 text-teal-300 border border-teal-500/20 font-mono-num">
-                  160x300
-                </span>
-              </div>
-              <p className="text-xs text-[#A69E95] leading-relaxed">
-                ১৬০x৩০০ উল্লম্ব (Skyscraper) ব্যানার কোড। স্টোরি ডিটেইলসের সাইড কলাম বা বড় স্ক্রিনে সাইডবার স্লটে এটি মনোরমভাবে ফিট হয়।
-              </p>
-              <textarea
-                rows={4}
-                value={adConfig.banner160x300Code || ''}
-                onChange={(e) => setAdConfig((prev) => ({ ...prev, banner160x300Code: e.target.value }))}
-                placeholder="<!-- 160x300 Vertical Banner Code -->"
-                className="w-full p-3 rounded-xl bg-[#09080B] border border-white/[0.08] text-xs font-mono text-[#F5F2EB] placeholder:text-[#524B57] focus:outline-none focus:border-[#EF4444]"
-              />
-            </div>
-          </div>
-
-          {/* Save Button Bar */}
-          <div className="flex items-center justify-end gap-3 p-4 rounded-2xl bg-[#120F16] border border-white/[0.08]">
-            <button
-              type="submit"
-              disabled={busy}
-              className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-[#DC2626] to-[#EF4444] text-white font-semibold text-sm cursor-pointer shadow-lg shadow-red-950/40 hover:opacity-95 transition-all disabled:opacity-50"
-            >
-              {busy ? (
-                <>
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                  <span>সংরক্ষণ হচ্ছে...</span>
-                </>
-              ) : (
-                <>
-                  <Save className="h-4 w-4" />
-                  <span>বিজ্ঞাপন সেটিংস সংরক্ষণ ও লাইভ করুন</span>
-                </>
-              )}
-            </button>
-          </div>
-        </form>
-      )}
+          </form>
+        )}
 
       {/* TAB: OWNER/ADMIN ONLY EDITOR & RBAC PERMISSION MANAGEMENT */}
       {effectiveTab === 'editors_rbac' && isOwnerAdmin && (

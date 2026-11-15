@@ -152,13 +152,60 @@ export interface UserProfile {
   membership: MembershipRecord;
 }
 
+export type AdTypeKey =
+  | 'banner_320x50'
+  | 'banner_160x300'
+  | 'native_ad'
+  | 'social_bar'
+  | 'popunder'
+  | 'smartlink';
+
+export type AdPageKey = 'home' | 'catalog' | 'story_details' | 'player';
+
+export type AdSlotKey =
+  | 'home_top'
+  | 'home_middle'
+  | 'home_bottom'
+  | 'catalog_inline'
+  | 'story_details_top'
+  | 'story_details_bottom'
+  | 'player_banner';
+
+export interface AdFormatControl {
+  enabled: boolean;
+  desktop: boolean;
+  mobile: boolean;
+}
+
 export interface AdSettings {
   enabled: boolean;
+  version: number;
+  status: 'draft' | 'published';
+  updatedAt?: string;
+  publishedAt?: string;
+  updatedBy?: string;
+  // Ad codes (Universal/Mobile & Desktop overrides)
   socialBarScript: string;
+  socialBarMobileScript: string;
   popunderScript: string;
+  popunderMobileScript: string;
   smartlinkUrl: string;
   banner320x50Code: string;
+  banner320x50DesktopCode: string;
   banner160x300Code: string;
+  nativeAdCode: string;
+  nativeAdMobileCode: string;
+  // Format-level activation + Desktop/Mobile toggles
+  enabledTypes: Record<AdTypeKey, AdFormatControl>;
+  // Page-level visibility switches
+  pages: Record<AdPageKey, boolean>;
+  // Slot-level placement switches
+  slots: Record<AdSlotKey, boolean>;
+  // Global device targeting switches
+  devices: {
+    desktop: boolean;
+    mobile: boolean;
+  };
 }
 
 export interface BootstrapPayload {
@@ -171,3 +218,4 @@ export interface BootstrapPayload {
   progress: PlaybackProgress[];
   adSettings?: AdSettings;
 }
+

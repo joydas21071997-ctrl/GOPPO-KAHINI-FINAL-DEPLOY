@@ -4,6 +4,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
   serverTimestamp,
   setDoc,
@@ -19,12 +20,14 @@ import {
 import {
   DEFAULT_TICKET_PRICE_INR,
   MAX_LISTENS_PER_PURCHASE,
+  type AdSettings,
   type CategoryConfig,
   type ContentCategory,
   type EditorGrant,
   type Language,
   type StoryItem,
 } from '../types/content';
+import { normalizeAdSettings } from '../utils/adConfig';
 
 const VALID_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
 const EDITOR_PERMS = new Set([
@@ -378,3 +381,132 @@ export async function fetchFirestoreDiagnostics(): Promise<{
     adminDocPresent,
   };
 }
+
+function buildAdFirestorePayload(
+  raw: AdSettings,
+  status: 'draft' | 'published',
+  actorUid: string,
+  version: number,
+  publishedAt?: string,
+) {
+  const norm = normalizeAdSettings(raw, status);
+  return {
+    enabled: norm.enabled,
+    version,
+    status,
+    socialBarScript: norm.socialBarScript,
+    socialBarMobileScript: norm.socialBarMobileScript,
+    popunderScript: norm.popunderScript,
+    popunderMobileScript: norm.popunderMobileScript,
+    smartlinkUrl: norm.smartlinkUrl,
+    banner320x50Code: norm.banner320x50Code,
+    banner320x50DesktopCode: norm.banner320x50DesktopCode,
+    banner160x300Code: norm.banner160x300Code,
+    nativeAdCode: norm.nativeAdCode,
+    nativeAdMobileCode: norm.nativeAdMobileCode,
+    enabledTypes: norm.enabledTypes,
+    pages: norm.pages,
+    slots: norm.slots,
+    devices: norm.devices,
+    ...(publishedAt ? { publishedAt } : norm.publishedAt ? { publishedAt: norm.publishedAt } : {}),
+    updatedBy: actorUid,
+    updatedAt: serverTimestamp(),
+  };
+}
+
+export async function saveAdDraftToFirestore(settings: AdSettings): Promise<AdSettings> {
+  const uid = auth?.currentUser?.uid;
+  const nowIso = new Date().toISOString();
+  const nextDraft = normalizeAdSettings({ ...settings, status: 'draft', updatedAt: nowIso }, 'draft');
+  if (!isFirebaseConfigured || !db || !uid) {
+    return nextDraft;
+  }
+  const path = 'ad_settings/draft';
+  try {
+    await setDoc(
+      doc(db, 'ad_settings', 'draft'),
+      buildAdFirestorePayload(nextDraft, 'draft', uid, Math.max(1, nextDraft.version || 1)),
+    );
+    return nextDraft;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function publishAdSettingsToFirestore(settings: AdSettings): Promise<AdSettings> {
+  const uid = auth?.currentUser?.uid;
+  const nowIso = new Date().toISOString();
+  const nextVersion = Math.max(1, (settings.version || 0) + 1);
+  const nextPublished = normalizeAdSettings(
+    {
+      ...settings,
+      status: 'published',
+      version: nextVersion,
+      publishedAt: nowIso,
+      updatedAt: nowIso,
+      updatedBy: uid || settings.updatedBy,
+    },
+    'published',
+  );
+  if (!isFirebaseConfigured || !db || !uid) {
+    return nextPublished;
+  }
+
+  try {
+    // 1. Update Published document (live source for website & PWA)
+    await setDoc(
+      doc(db, 'ad_settings', 'published'),
+      buildAdFirestorePayload(nextPublished, 'published', uid, nextVersion, nowIso),
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'ad_settings/published');
+  }
+
+  try {
+    // 2. Sync Draft document to match the newly published snapshot
+    await setDoc(
+      doc(db, 'ad_settings', 'draft'),
+      buildAdFirestorePayload(nextPublished, 'draft', uid, nextVersion, nowIso),
+    );
+  } catch {
+    // Non-blocking if draft doc update fails after published succeeds
+  }
+
+  return nextPublished;
+}
+
+export async function fetchPublishedAdsFromFirestore(): Promise<AdSettings | null> {
+  if (!isFirebaseConfigured || !db) return null;
+  try {
+    // Always fetch directly from server so PWA/browser SW cache never serves stale ad settings
+    const snap = await getDocFromServer(doc(db, 'ad_settings', 'published'));
+    if (snap.exists()) {
+      return normalizeAdSettings(snap.data(), 'published');
+    }
+    return null;
+  } catch {
+    try {
+      const snap = await getDoc(doc(db, 'ad_settings', 'published'));
+      if (snap.exists()) {
+        return normalizeAdSettings(snap.data(), 'published');
+      }
+    } catch {
+      // Offline / unseeded fallback
+    }
+    return null;
+  }
+}
+
+export async function fetchDraftAdsFromFirestore(): Promise<AdSettings | null> {
+  if (!isFirebaseConfigured || !db || !auth?.currentUser) return null;
+  try {
+    const snap = await getDocFromServer(doc(db, 'ad_settings', 'draft'));
+    if (snap.exists()) {
+      return normalizeAdSettings(snap.data(), 'draft');
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
