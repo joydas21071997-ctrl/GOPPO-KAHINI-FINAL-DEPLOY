@@ -50,6 +50,11 @@ import type {
   UserProfile,
 } from './src/types/content.ts';
 import { createDefaultAdSettings, normalizeAdSettings } from './src/utils/adConfig.ts';
+import {
+  SECTION_AND_INFO_SEO_SPECS,
+  getEpisodePath,
+  getStoryPath,
+} from './src/utils/routes.ts';
 
 dotenv.config();
 
@@ -1613,10 +1618,21 @@ Respond with strictly valid JSON in this exact structure:
 
     const urlEntries = [
       `  <url>\n    <loc>${escapeXml(`${baseUrl}/`)}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>1.0</priority>\n  </url>`,
+      ...SECTION_AND_INFO_SEO_SPECS.map(
+        (spec) =>
+          `  <url>\n    <loc>${escapeXml(`${baseUrl}${spec.path}`)}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>${spec.changefreq}</changefreq>\n    <priority>${spec.priority}</priority>\n  </url>`,
+      ),
       ...publishedStories.map((story) => {
         const lastMod = (story.updatedAt || today).slice(0, 10);
-        const storyUrl = `${baseUrl}/story/${encodeURIComponent(story.id)}`;
+        const storyUrl = `${baseUrl}${getStoryPath(story)}`;
         return `  <url>\n    <loc>${escapeXml(storyUrl)}</loc>\n    <lastmod>${escapeXml(lastMod)}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.8</priority>\n  </url>`;
+      }),
+      ...publishedStories.flatMap((story) => {
+        const lastMod = (story.updatedAt || today).slice(0, 10);
+        return (story.episodes || []).map((ep) => {
+          const epUrl = `${baseUrl}${getEpisodePath(ep)}`;
+          return `  <url>\n    <loc>${escapeXml(epUrl)}</loc>\n    <lastmod>${escapeXml(lastMod)}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>`;
+        });
       }),
     ];
 

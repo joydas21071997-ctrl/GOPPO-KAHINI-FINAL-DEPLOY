@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   FileText,
   HelpCircle,
+  Info,
   Mail,
   RotateCcw,
   Scale,
@@ -19,6 +20,7 @@ interface PolicyModalProps {
 }
 
 const TAB_ICONS: Record<PolicyTabKey, React.ComponentType<{ className?: string }>> = {
+  about: Info,
   terms: Scale,
   privacy: ShieldCheck,
   refund: RotateCcw,
@@ -45,7 +47,7 @@ export const PolicyModal: React.FC<PolicyModalProps> = ({
 
   const currentDocs = POLICIES[language] || POLICIES.bn;
   const activeDoc = currentDocs[activeTab] || currentDocs.terms;
-  const tabKeys: PolicyTabKey[] = ['terms', 'privacy', 'refund', 'copyright', 'contact'];
+  const tabKeys: PolicyTabKey[] = ['about', 'terms', 'privacy', 'refund', 'copyright', 'contact'];
 
   return (
     <div

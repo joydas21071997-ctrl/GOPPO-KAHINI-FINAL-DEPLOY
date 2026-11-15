@@ -18,6 +18,7 @@ interface StoryCarouselProps {
   user: UserProfile | null;
   progress?: PlaybackProgress[];
   onViewAll?: () => void;
+  viewAllHref?: string;
   onOpenDetails: (storyId: string) => void;
   onBuyTicket: (story: StoryItem) => void;
   onPlayTrailer: (story: StoryItem) => void;
@@ -31,6 +32,7 @@ export const StoryCarousel: React.FC<StoryCarouselProps> = ({
   user,
   progress = [],
   onViewAll,
+  viewAllHref,
   onOpenDetails,
   onBuyTicket,
   onPlayTrailer,
@@ -64,15 +66,27 @@ export const StoryCarousel: React.FC<StoryCarouselProps> = ({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          {onViewAll && (
-            <button
-              type="button"
-              onClick={onViewAll}
-              className="px-3 py-1.5 rounded-xl bg-gradient-to-b from-white/[0.05] to-white/[0.02] hover:bg-white/[0.08] border border-white/[0.07] text-xs font-semibold text-[#EF4444] hover:text-[#F87171] transition-all whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              {t.cards.viewAll} →
-            </button>
-          )}
+          {onViewAll &&
+            (viewAllHref ? (
+              <a
+                href={viewAllHref}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onViewAll();
+                }}
+                className="px-3 py-1.5 rounded-xl bg-gradient-to-b from-white/[0.05] to-white/[0.02] hover:bg-white/[0.08] border border-white/[0.07] text-xs font-semibold text-[#EF4444] hover:text-[#F87171] transition-all whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                {t.cards.viewAll} →
+              </a>
+            ) : (
+              <button
+                type="button"
+                onClick={onViewAll}
+                className="px-3 py-1.5 rounded-xl bg-gradient-to-b from-white/[0.05] to-white/[0.02] hover:bg-white/[0.08] border border-white/[0.07] text-xs font-semibold text-[#EF4444] hover:text-[#F87171] transition-all whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                {t.cards.viewAll} →
+              </button>
+            ))}
           <div className="hidden sm:flex items-center gap-1">
             <button
               type="button"

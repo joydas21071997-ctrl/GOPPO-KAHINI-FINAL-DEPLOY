@@ -1,9 +1,9 @@
 import React from 'react';
-import { FileText, HelpCircle, Key, Mail, RotateCcw, Scale, ShieldCheck } from 'lucide-react';
+import { FileText, HelpCircle, Info, Key, Mail, RotateCcw, Scale, ShieldCheck } from 'lucide-react';
 import type { Language } from '../types/content';
 import type { UIStrings } from '../i18n/translations';
 import { GoppoKahiniLogo } from './GoppoKahiniLogo';
-import type { ActiveRoute } from './Header';
+import { getRoutePath, type ActiveRoute, type InfoPageKey } from '../utils/routes';
 import type { PolicyTabKey } from '../data/policyData';
 
 interface FooterProps {
@@ -11,7 +11,7 @@ interface FooterProps {
   onChangeLanguage: (lang: Language) => void;
   t: UIStrings;
   onNavigate: (route: ActiveRoute) => void;
-  onOpenPolicy: (tab: PolicyTabKey) => void;
+  onOpenPolicy?: (tab: PolicyTabKey) => void;
 }
 
 export const Footer: React.FC<FooterProps> = ({
@@ -19,13 +19,22 @@ export const Footer: React.FC<FooterProps> = ({
   onChangeLanguage,
   t,
   onNavigate,
-  onOpenPolicy,
 }) => {
+  const handleRouteLink = (e: React.MouseEvent, route: ActiveRoute) => {
+    e.preventDefault();
+    onNavigate(route);
+  };
+
+  const navigateInfoPage = (e: React.MouseEvent, page: InfoPageKey) => {
+    e.preventDefault();
+    onNavigate({ view: 'page', page });
+  };
+
   return (
     <footer className="mt-20 border-t border-white/[0.06] bg-gradient-to-b from-[#0C0A0E] via-[#09080B] to-[#050406]">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-14 space-y-10">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-8 lg:gap-10">
-          {/* Brand & About Column (5 cols) */}
+          {/* Brand & About Column (4 cols) */}
           <div className="lg:col-span-4 space-y-4">
             <GoppoKahiniLogo onClick={() => onNavigate({ view: 'home', category: 'audio' })} />
             <p className="text-xs sm:text-sm text-[#9E968F] leading-relaxed max-w-sm">
@@ -46,72 +55,72 @@ export const Footer: React.FC<FooterProps> = ({
             </h3>
             <ul className="space-y-2.5 text-xs sm:text-sm text-[#9E968F]">
               <li>
-                <button
-                  type="button"
-                  onClick={() => onNavigate({ view: 'all_stories', category: 'all' })}
-                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer"
+                <a
+                  href="/stories"
+                  onClick={(e) => handleRouteLink(e, { view: 'all_stories', category: 'all' })}
+                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer inline-block"
                 >
                   {t.nav.stories}
-                </button>
+                </a>
               </li>
               <li>
-                <button
-                  type="button"
-                  onClick={() => onNavigate({ view: 'all_stories', category: 'audio' })}
-                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer"
+                <a
+                  href="/audio-series"
+                  onClick={(e) => handleRouteLink(e, { view: 'all_stories', category: 'audio' })}
+                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer inline-block"
                 >
                   {t.nav.audio}
-                </button>
+                </a>
               </li>
               <li>
-                <button
-                  type="button"
-                  onClick={() => onNavigate({ view: 'all_stories', category: 'animation' })}
-                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer"
+                <a
+                  href="/videos"
+                  onClick={(e) => handleRouteLink(e, { view: 'all_stories', category: 'videos' })}
+                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer inline-block"
                 >
                   {t.nav.animation}
-                </button>
+                </a>
               </li>
               <li>
-                <button
-                  type="button"
-                  onClick={() => onNavigate({ view: 'all_stories', category: 'free' })}
-                  className="hover:text-emerald-300 transition-colors cursor-pointer text-emerald-400"
+                <a
+                  href="/free-stories"
+                  onClick={(e) => handleRouteLink(e, { view: 'all_stories', category: 'free' })}
+                  className="hover:text-emerald-300 transition-colors cursor-pointer text-emerald-400 inline-block"
                 >
                   {t.nav.free}
-                </button>
+                </a>
               </li>
               <li>
-                <button
-                  type="button"
-                  onClick={() => onNavigate({ view: 'all_stories', category: 'premium' })}
-                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer text-[#EF4444]"
+                <a
+                  href="/premium"
+                  onClick={(e) => handleRouteLink(e, { view: 'all_stories', category: 'premium' })}
+                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer text-[#EF4444] inline-block"
                 >
                   {t.nav.premium}
-                </button>
+                </a>
               </li>
               <li>
-                <button
-                  type="button"
-                  onClick={() => onNavigate({ view: 'library', initialTab: 'my_stories' })}
-                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer"
+                <a
+                  href="/library"
+                  onClick={(e) => handleRouteLink(e, { view: 'library', initialTab: 'my_stories' })}
+                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer inline-block"
                 >
                   {t.nav.library}
-                </button>
+                </a>
               </li>
               <li>
-                <button
-                  type="button"
-                  onClick={() => onNavigate({ view: 'library', initialTab: 'account' })}
-                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer"
+                <a
+                  href="/account"
+                  onClick={(e) => handleRouteLink(e, { view: 'library', initialTab: 'account' })}
+                  className="hover:text-[#F5F2EB] transition-colors cursor-pointer inline-block"
                 >
                   {t.nav.loginRegister}
-                </button>
+                </a>
               </li>
             </ul>
           </div>
 
-          {/* Legal & Policy Pages (3 cols) - Direct links requested by user */}
+          {/* Legal & Policy Pages (3 cols) - Direct dedicated URL links */}
           <div className="lg:col-span-3 space-y-3">
             <h3 className="text-xs font-semibold text-[#EF4444] tracking-wider uppercase flex items-center gap-1.5">
               <Scale className="h-3.5 w-3.5" />
@@ -119,54 +128,64 @@ export const Footer: React.FC<FooterProps> = ({
             </h3>
             <ul className="space-y-2.5 text-xs sm:text-sm text-[#9E968F]">
               <li>
-                <button
-                  type="button"
-                  onClick={() => onOpenPolicy('terms')}
+                <a
+                  href={getRoutePath({ view: 'page', page: 'about' })}
+                  onClick={(e) => navigateInfoPage(e, 'about')}
+                  className="hover:text-red-400 transition-colors text-left flex items-center gap-2 cursor-pointer"
+                >
+                  <Info className="h-3.5 w-3.5 text-[#A69E95] shrink-0" />
+                  <span>{language === 'bn' ? 'আমাদের সম্পর্কে (About Us)' : 'हमारे बारे में (About Us)'}</span>
+                </a>
+              </li>
+              <li>
+                <a
+                  href={getRoutePath({ view: 'page', page: 'terms' })}
+                  onClick={(e) => navigateInfoPage(e, 'terms')}
                   className="hover:text-red-400 transition-colors text-left flex items-center gap-2 cursor-pointer"
                 >
                   <FileText className="h-3.5 w-3.5 text-[#A69E95] shrink-0" />
                   <span>{language === 'bn' ? 'ব্যবহারের শর্তাবলী (Terms)' : 'उपयोग की शर्तें'}</span>
-                </button>
+                </a>
               </li>
               <li>
-                <button
-                  type="button"
-                  onClick={() => onOpenPolicy('privacy')}
+                <a
+                  href={getRoutePath({ view: 'page', page: 'privacy' })}
+                  onClick={(e) => navigateInfoPage(e, 'privacy')}
                   className="hover:text-red-400 transition-colors text-left flex items-center gap-2 cursor-pointer"
                 >
                   <ShieldCheck className="h-3.5 w-3.5 text-[#A69E95] shrink-0" />
                   <span>{language === 'bn' ? 'গোপনীয়তা নীতি (Privacy)' : 'गोपनीयता नीति'}</span>
-                </button>
+                </a>
               </li>
               <li>
-                <button
-                  type="button"
-                  onClick={() => onOpenPolicy('refund')}
+                <a
+                  href={getRoutePath({ view: 'page', page: 'refund' })}
+                  onClick={(e) => navigateInfoPage(e, 'refund')}
                   className="hover:text-red-400 transition-colors text-left flex items-center gap-2 cursor-pointer"
                 >
                   <RotateCcw className="h-3.5 w-3.5 text-[#A69E95] shrink-0" />
                   <span>{language === 'bn' ? 'রিফান্ড ও বাতিলকরণ নীতি' : 'रिफंड एवं रद्दीकरण'}</span>
-                </button>
+                </a>
               </li>
               <li>
-                <button
-                  type="button"
-                  onClick={() => onOpenPolicy('copyright')}
+                <a
+                  href={getRoutePath({ view: 'page', page: 'copyright' })}
+                  onClick={(e) => navigateInfoPage(e, 'copyright')}
                   className="hover:text-red-400 transition-colors text-left flex items-center gap-2 cursor-pointer"
                 >
                   <HelpCircle className="h-3.5 w-3.5 text-[#A69E95] shrink-0" />
                   <span>{language === 'bn' ? 'মেধাস্বত্ব ও কপিরাইট নীতি' : 'कॉपीराइट नीति'}</span>
-                </button>
+                </a>
               </li>
               <li>
-                <button
-                  type="button"
-                  onClick={() => onOpenPolicy('contact')}
+                <a
+                  href={getRoutePath({ view: 'page', page: 'contact' })}
+                  onClick={(e) => navigateInfoPage(e, 'contact')}
                   className="hover:text-red-400 transition-colors text-left flex items-center gap-2 cursor-pointer"
                 >
                   <Mail className="h-3.5 w-3.5 text-[#A69E95] shrink-0" />
                   <span>{language === 'bn' ? 'সহায়তা ও যোগাযোগ' : 'सहायता और संपर्क'}</span>
-                </button>
+                </a>
               </li>
             </ul>
           </div>
@@ -183,7 +202,13 @@ export const Footer: React.FC<FooterProps> = ({
               <p className="font-semibold text-[#F5F2EB]">
                 {language === 'bn' ? 'গ্রাহক সহায়তা ডেস্ক' : 'ग्राहक सहायता डेस्क'}
               </p>
-              <p className="font-mono-num text-[#EF4444]">hello@goppokahini.in</p>
+              <a
+                href="/contact"
+                onClick={(e) => navigateInfoPage(e, 'contact')}
+                className="block font-mono-num text-[#EF4444] hover:underline"
+              >
+                hello@goppokahini.in
+              </a>
               <p>{language === 'bn' ? 'সকাল ১০টা - রাত ৮টা (সোম-রবি)' : 'सुबह 10:00 - रात 8:00 (सोम-रवि)'}</p>
             </div>
           </div>
@@ -219,15 +244,15 @@ export const Footer: React.FC<FooterProps> = ({
 
             {/* Small discreet key icon for instant Admin Panel entrance requested by user */}
             <span className="text-white/10" aria-hidden="true">·</span>
-            <button
-              type="button"
-              onClick={() => onNavigate({ view: 'admin' })}
+            <a
+              href="/admin"
+              onClick={(e) => handleRouteLink(e, { view: 'admin' })}
               title={language === 'bn' ? 'এডমিন স্টুডিও (Admin Studio)' : 'एडमिन स्टूडियो'}
               className="inline-flex items-center justify-center h-6 w-6 rounded text-[#6D6660] hover:text-[#EF4444] hover:bg-white/[0.06] transition-colors cursor-pointer"
               aria-label="Admin Studio Key"
             >
               <Key className="h-3.5 w-3.5" />
-            </button>
+            </a>
           </div>
         </div>
       </div>

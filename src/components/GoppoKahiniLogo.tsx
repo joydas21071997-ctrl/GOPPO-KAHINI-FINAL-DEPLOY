@@ -3,12 +3,14 @@ import React from 'react';
 interface GoppoKahiniLogoProps {
   customLogoUrl?: string;
   compact?: boolean;
+  href?: string;
   onClick?: () => void;
 }
 
 export const GoppoKahiniLogo: React.FC<GoppoKahiniLogoProps> = ({
   customLogoUrl,
   compact = false,
+  href = '/',
   onClick,
 }) => {
 
@@ -27,14 +29,17 @@ export const GoppoKahiniLogo: React.FC<GoppoKahiniLogoProps> = ({
 
   if (onClick) {
     return (
-      <button
-        type="button"
-        onClick={onClick}
+      <a
+        href={href}
+        onClick={(e) => {
+          e.preventDefault();
+          onClick();
+        }}
         className="inline-flex items-center focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#EF4444] rounded-md cursor-pointer"
         aria-label="Goppo Kahini Home"
       >
         {content}
-      </button>
+      </a>
     );
   }
 

@@ -9,6 +9,7 @@ import {
   isFreeStory,
   isPremiumStory,
 } from '../utils/contentClassification';
+import { getEpisodePath, getStoryPath } from '../utils/routes';
 import { ArtworkImage } from './ArtworkImage';
 import { SocialShareModal } from './SocialShareModal';
 import { StoryProgressIndicator } from './StoryProgressIndicator';
@@ -23,6 +24,7 @@ interface StoryDetailsViewProps {
   isPlaying: boolean;
   adSettings?: AdSettings;
   onBack: () => void;
+  onOpenEpisode?: (story: StoryItem, episode: Episode) => void;
   onPlayTrailer: (story: StoryItem) => void;
   onPlayEpisode: (story: StoryItem, episode: Episode) => void;
   onEpisodeComplete?: (story: StoryItem, episode: Episode) => void;
@@ -38,6 +40,7 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
   isPlaying,
   adSettings,
   onBack,
+  onOpenEpisode,
   onPlayTrailer,
   onPlayEpisode,
   onEpisodeComplete,
@@ -65,7 +68,7 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
 
   const storyUrl =
     typeof window !== 'undefined'
-      ? `${window.location.origin}/story/${encodeURIComponent(story.id)}`
+      ? `${window.location.origin}${getStoryPath(story)}`
       : '';
 
   const storyOverallProgress = progress.find((p) => p.storyId === story.id);
@@ -414,7 +417,18 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
                       {String(ep.number).padStart(2, '0')}
                     </span>
                     <h3 className="font-editorial text-base sm:text-lg font-semibold text-[#F5F2EB]">
-                      {ep.title}
+                      <a
+                        href={getEpisodePath(ep)}
+                        onClick={(e) => {
+                          if (onOpenEpisode) {
+                            e.preventDefault();
+                            onOpenEpisode(story, ep);
+                          }
+                        }}
+                        className="hover:text-red-400 transition-colors cursor-pointer"
+                      >
+                        {ep.title}
+                      </a>
                     </h3>
                     <span className="font-mono-num text-xs text-[#A69E95]">
                       · {ep.durationLabel}

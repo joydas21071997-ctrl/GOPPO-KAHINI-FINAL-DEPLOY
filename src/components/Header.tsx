@@ -4,16 +4,13 @@ import type { CategoryConfig, ContentCategory, Language, UserProfile } from '../
 import type { UIStrings } from '../i18n/translations';
 import { GoppoKahiniLogo } from './GoppoKahiniLogo';
 import { PWAInstallButton } from './PWAInstallButton';
+import {
+  getRoutePath,
+  type ActiveRoute,
+  type StoryCollectionFilter,
+} from '../utils/routes';
 
-export type StoryCollectionFilter = ContentCategory | 'all' | 'free' | 'premium';
-
-export type ActiveRoute =
-  | { view: 'home'; category?: ContentCategory }
-  | { view: 'all_stories'; category?: StoryCollectionFilter }
-  | { view: 'story'; storyId: string }
-  | { view: 'npass' }
-  | { view: 'library'; initialTab?: string }
-  | { view: 'admin' };
+export type { ActiveRoute, StoryCollectionFilter };
 
 interface HeaderProps {
   language: Language;
@@ -76,10 +73,12 @@ export const Header: React.FC<HeaderProps> = ({
     {
       id: 'animation',
       label: t.nav.animation,
-      route: { view: 'all_stories', category: 'animation' },
+      route: { view: 'all_stories', category: 'videos' },
       isActive:
         activeRoute.view === 'all_stories' &&
-        (activeRoute.category === 'animation' || activeRoute.category === 'films'),
+        (activeRoute.category === 'videos' ||
+          activeRoute.category === 'animation' ||
+          activeRoute.category === 'films'),
       icon: <Film className="h-4 w-4 text-[#EF4444]" />,
     },
     {
@@ -119,27 +118,32 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Zone 2: Clean Primary Top Navigation */}
         <nav className="hidden lg:flex items-center gap-1 text-sm font-medium overflow-x-auto no-scrollbar">
-          {navItems.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => {
-                onSearchChange('');
-                handleNavClick(item.route);
-              }}
-              className={`relative px-3 py-1.5 rounded-xl text-xs xl:text-sm transition-all whitespace-nowrap shrink-0 cursor-pointer ${
-                item.isActive
-                  ? 'bg-gradient-to-r from-red-500/15 via-red-500/10 to-transparent border border-red-500/30 text-red-300 font-semibold shadow-sm'
-                  : 'text-[#C8BFB5] hover:text-[#F5F2EB] hover:bg-white/[0.04]'
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
+          {navItems.map((item) => {
+            const href = getRoutePath(item.route);
+            return (
+              <a
+                key={item.id}
+                href={href}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onSearchChange('');
+                  handleNavClick(item.route);
+                }}
+                className={`relative px-3 py-1.5 rounded-xl text-xs xl:text-sm transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+                  item.isActive
+                    ? 'bg-gradient-to-r from-red-500/15 via-red-500/10 to-transparent border border-red-500/30 text-red-300 font-semibold shadow-sm'
+                    : 'text-[#C8BFB5] hover:text-[#F5F2EB] hover:bg-white/[0.04]'
+                }`}
+              >
+                {item.label}
+              </a>
+            );
+          })}
 
-          <button
-            type="button"
-            onClick={() => {
+          <a
+            href="/library"
+            onClick={(e) => {
+              e.preventDefault();
               onSearchChange('');
               handleNavClick({
                 view: 'library',
@@ -153,12 +157,15 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             {t.nav.library}
-          </button>
+          </a>
 
           {(user?.role === 'admin' || user?.role === 'editor') && (
-            <button
-              type="button"
-              onClick={() => handleNavClick({ view: 'admin' })}
+            <a
+              href="/admin"
+              onClick={(e) => {
+                e.preventDefault();
+                handleNavClick({ view: 'admin' });
+              }}
               className={`px-3 py-1.5 rounded-xl text-xs xl:text-sm font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
                 activeRoute.view === 'admin'
                   ? 'bg-red-500/20 text-red-300 border border-red-500/30'
@@ -166,7 +173,7 @@ export const Header: React.FC<HeaderProps> = ({
               }`}
             >
               {t.nav.admin}
-            </button>
+            </a>
           )}
         </nav>
 
@@ -240,14 +247,15 @@ export const Header: React.FC<HeaderProps> = ({
           <PWAInstallButton compact />
 
           {/* Profile / Free Login & Registration Button */}
-          <button
-            type="button"
-            onClick={() =>
+          <a
+            href="/account"
+            onClick={(e) => {
+              e.preventDefault();
               handleNavClick({
                 view: 'library',
                 initialTab: 'account',
-              })
-            }
+              });
+            }}
             className="inline-flex h-9 px-2.5 sm:px-3 items-center gap-1.5 rounded-xl bg-gradient-to-b from-white/[0.06] to-white/[0.02] border border-white/[0.1] text-xs font-medium text-[#F5F2EB] hover:border-red-500/40 hover:bg-white/[0.08] transition-all whitespace-nowrap shrink-0 cursor-pointer"
             aria-label={user ? user.name : t.nav.loginRegister}
           >
@@ -255,7 +263,7 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="hidden sm:inline max-w-[125px] truncate">
               {user ? user.name : t.nav.loginRegister}
             </span>
-          </button>
+          </a>
         </div>
       </div>
 
@@ -294,28 +302,33 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Mobile Hamburger Drawer */}
       {mobileMenuOpen && (
         <div className="lg:hidden border-t border-white/[0.06] bg-[#1A0808]/98 px-4 py-4 space-y-1.5 shadow-2xl backdrop-blur-xl">
-          {navItems.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => {
-                onSearchChange('');
-                handleNavClick(item.route);
-              }}
-              className={`w-full flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-left text-sm font-medium transition-all cursor-pointer ${
-                item.isActive
-                  ? 'bg-red-500/15 text-red-300 border border-red-500/25'
-                  : 'text-[#F5F2EB] hover:bg-white/[0.04]'
-              }`}
-            >
-              {item.icon}
-              <span>{item.label}</span>
-            </button>
-          ))}
+          {navItems.map((item) => {
+            const href = getRoutePath(item.route);
+            return (
+              <a
+                key={item.id}
+                href={href}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onSearchChange('');
+                  handleNavClick(item.route);
+                }}
+                className={`w-full flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-left text-sm font-medium transition-all cursor-pointer ${
+                  item.isActive
+                    ? 'bg-red-500/15 text-red-300 border border-red-500/25'
+                    : 'text-[#F5F2EB] hover:bg-white/[0.04]'
+                }`}
+              >
+                {item.icon}
+                <span>{item.label}</span>
+              </a>
+            );
+          })}
 
-          <button
-            type="button"
-            onClick={() => {
+          <a
+            href="/free-stories"
+            onClick={(e) => {
+              e.preventDefault();
               onSearchChange('');
               handleNavClick({ view: 'all_stories', category: 'free' });
             }}
@@ -327,35 +340,44 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Sparkles className="h-4 w-4 text-emerald-400" />
             <span>{t.nav.free}</span>
-          </button>
+          </a>
 
           <div className="pt-2 mt-2 border-t border-white/[0.06] space-y-1">
-            <button
-              type="button"
-              onClick={() => handleNavClick({ view: 'library', initialTab: 'my_stories' })}
+            <a
+              href="/library"
+              onClick={(e) => {
+                e.preventDefault();
+                handleNavClick({ view: 'library', initialTab: 'my_stories' });
+              }}
               className="w-full flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-left text-sm font-medium text-[#F5F2EB] hover:bg-white/[0.04] cursor-pointer"
             >
               <Library className="h-4 w-4 text-[#EF4444]" />
               <span>{t.nav.library}</span>
-            </button>
+            </a>
 
-            <button
-              type="button"
-              onClick={() => handleNavClick({ view: 'library', initialTab: 'account' })}
+            <a
+              href="/account"
+              onClick={(e) => {
+                e.preventDefault();
+                handleNavClick({ view: 'library', initialTab: 'account' });
+              }}
               className="w-full flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-left text-sm font-medium text-[#C8BFB5] hover:text-[#F5F2EB] hover:bg-white/[0.04] cursor-pointer"
             >
               <User className="h-4 w-4 text-[#EF4444]" />
               <span>{user ? `${t.nav.profile} (${user.name})` : t.nav.loginRegister}</span>
-            </button>
+            </a>
 
             {(user?.role === 'admin' || user?.role === 'editor') && (
-              <button
-                type="button"
-                onClick={() => handleNavClick({ view: 'admin' })}
+              <a
+                href="/admin"
+                onClick={(e) => {
+                  e.preventDefault();
+                  handleNavClick({ view: 'admin' });
+                }}
                 className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-left text-sm font-medium text-red-400 hover:bg-white/[0.04] cursor-pointer"
               >
                 <span>{t.nav.admin}</span>
-              </button>
+              </a>
             )}
 
             <div className="pt-2 flex justify-start">

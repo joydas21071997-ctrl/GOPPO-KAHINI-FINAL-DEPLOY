@@ -7,6 +7,7 @@ import {
   hasExhaustedListens,
   isFreeStory,
 } from '../utils/contentClassification';
+import { getStoryPath } from '../utils/routes';
 import { ArtworkImage } from './ArtworkImage';
 import { StoryProgressIndicator } from './StoryProgressIndicator';
 
@@ -197,11 +198,19 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
           </div>
 
           <h1
-            onClick={() => onOpenDetails(story.id)}
-            className="font-editorial text-2xl sm:text-3xl lg:text-4xl font-bold leading-[1.2] text-[#F5F2EB] mb-2.5 cursor-pointer hover:text-red-400 transition-colors"
+            className="font-editorial text-2xl sm:text-3xl lg:text-4xl font-bold leading-[1.2] text-[#F5F2EB] mb-2.5 hover:text-red-400 transition-colors"
             style={{ textWrap: 'balance' }}
           >
-            {story.title}
+            <a
+              href={getStoryPath(story)}
+              onClick={(e) => {
+                e.preventDefault();
+                onOpenDetails(story.id);
+              }}
+              className="cursor-pointer"
+            >
+              {story.title}
+            </a>
           </h1>
 
           <p className="text-xs sm:text-sm text-[#9E968F] leading-relaxed line-clamp-3 mb-4 max-w-xl">

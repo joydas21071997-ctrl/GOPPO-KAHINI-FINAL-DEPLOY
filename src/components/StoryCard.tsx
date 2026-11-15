@@ -3,6 +3,7 @@ import { Crown, Headphones, Play, Sparkles, Ticket } from 'lucide-react';
 import type { PlaybackProgress, StoryItem } from '../types/content';
 import type { UIStrings } from '../i18n/translations';
 import { isFreeStory } from '../utils/contentClassification';
+import { getStoryPath } from '../utils/routes';
 import { ArtworkImage } from './ArtworkImage';
 import { StoryProgressIndicator } from './StoryProgressIndicator';
 
@@ -34,19 +35,29 @@ export const StoryCard: React.FC<StoryCardProps> = ({
   const isFree = isFreeStory(story);
   const hasFullAccess = isFree || hasTicket || unlockedViaNPass;
   const shortSummary = story.subtitle || story.synopsis;
+  const storyHref = getStoryPath(story);
+
+  const handleOpenLink = (e: React.MouseEvent) => {
+    e.preventDefault();
+    onOpenDetails(story.id);
+  };
 
   return (
     <article className="group flex flex-col rounded-xl bg-gradient-to-b from-[#141117] via-[#0F0D12] to-[#09080B] border border-white/[0.06] hover:border-red-500/30 transition-all duration-200 overflow-hidden h-full shadow-md shadow-black/40 hover:shadow-xl hover:shadow-black/70 min-w-0">
       {/* Compact Cover Artwork */}
-      <div
-        onClick={() => onOpenDetails(story.id)}
-        className="relative aspect-[4/5] w-full overflow-hidden bg-[#0A090C] cursor-pointer"
-      >
-        <ArtworkImage
-          srcKeyOrUrl={story.coverArt}
-          alt={story.title}
-          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
-        />
+      <div className="relative aspect-[4/5] w-full overflow-hidden bg-[#0A090C]">
+        <a
+          href={storyHref}
+          onClick={handleOpenLink}
+          className="block h-full w-full cursor-pointer"
+          aria-label={story.title}
+        >
+          <ArtworkImage
+            srcKeyOrUrl={story.coverArt}
+            alt={story.title}
+            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+          />
+        </a>
         <div
           aria-hidden="true"
           className="absolute inset-0 bg-gradient-to-t from-[#0F0D12] via-transparent to-black/40 opacity-90"
@@ -101,11 +112,10 @@ export const StoryCard: React.FC<StoryCardProps> = ({
             <span className="font-mono-num shrink-0">{story.totalDurationLabel}</span>
           </div>
 
-          <h3
-            onClick={() => onOpenDetails(story.id)}
-            className="font-editorial text-sm sm:text-[15px] font-bold text-[#F5F2EB] leading-snug line-clamp-2 cursor-pointer group-hover:text-red-400 transition-colors"
-          >
-            {story.title}
+          <h3 className="font-editorial text-sm sm:text-[15px] font-bold text-[#F5F2EB] leading-snug line-clamp-2 group-hover:text-red-400 transition-colors">
+            <a href={storyHref} onClick={handleOpenLink} className="block cursor-pointer">
+              {story.title}
+            </a>
           </h3>
 
           {shortSummary && (
@@ -127,18 +137,18 @@ export const StoryCard: React.FC<StoryCardProps> = ({
           {/* Mobile-Safe Ticket Price & Action Footer (Never overflows 2-column mobile cards) */}
           <div className="pt-2 border-t border-white/[0.06] w-full min-w-0">
             {isFree ? (
-              <button
-                type="button"
-                onClick={() => onOpenDetails(story.id)}
+              <a
+                href={storyHref}
+                onClick={handleOpenLink}
                 className="w-full inline-flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 transition-colors cursor-pointer"
               >
                 <Headphones className="h-3 w-3 shrink-0" />
                 <span className="truncate">{t.hero.listenFree}</span>
-              </button>
+              </a>
             ) : hasFullAccess ? (
-              <button
-                type="button"
-                onClick={() => onOpenDetails(story.id)}
+              <a
+                href={storyHref}
+                onClick={handleOpenLink}
                 className="w-full inline-flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-gradient-to-b from-white/[0.06] to-white/[0.02] hover:bg-white/[0.09] border border-red-500/25 text-[11px] font-semibold text-red-300 transition-colors cursor-pointer"
               >
                 <Headphones className="h-3 w-3 text-[#EF4444] shrink-0" />
@@ -147,20 +157,20 @@ export const StoryCard: React.FC<StoryCardProps> = ({
                     ? `${t.cards.unlocked} (${remainingListens}/2)`
                     : t.cards.unlocked}
                 </span>
-              </button>
+              </a>
             ) : (
               <div className="flex flex-col gap-1.5 w-full min-w-0">
                 <div className="flex items-center justify-between gap-1 w-full min-w-0">
                   <span className="font-mono-num text-xs sm:text-sm font-bold text-[#EF4444] shrink-0">
                     ₹{story.ticketPriceInr}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => onOpenDetails(story.id)}
+                  <a
+                    href={storyHref}
+                    onClick={handleOpenLink}
                     className="py-0.5 px-1.5 rounded-md text-[10px] sm:text-[11px] font-medium text-[#9E968F] hover:text-[#F5F2EB] hover:bg-white/[0.04] transition-colors cursor-pointer truncate"
                   >
                     {t.cards.details}
-                  </button>
+                  </a>
                 </div>
 
                 <button

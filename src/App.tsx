@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Clock,
@@ -37,6 +37,8 @@ import { HeroBanner } from './components/HeroBanner';
 import { StoryCarousel } from './components/StoryCarousel';
 import { StoryCard } from './components/StoryCard';
 import { StoryDetailsView } from './components/StoryDetailsView';
+import { EpisodeDetailsView } from './components/EpisodeDetailsView';
+import { InfoPageView } from './components/InfoPageView';
 import { CheckoutModal } from './components/CheckoutModal';
 import { AudioPlayer, type ActiveTrack } from './components/AudioPlayer';
 import { UserLibraryView } from './components/UserLibraryView';
@@ -64,7 +66,15 @@ import {
   isFreeStory,
   isPremiumStory,
 } from './utils/contentClassification';
-import type { PolicyTabKey } from './data/policyData';
+import {
+  findStaticSeoSpecByRoute,
+  findStoryByEpisodeId,
+  getEpisodePath,
+  getRoutePath,
+  getStoryPath,
+  parseLocationToRoute,
+} from './utils/routes';
+import { POLICIES, type PolicyTabKey } from './data/policyData';
 
 const STORAGE_LANG_KEY = 'goppo_kahini_lang';
 const STORAGE_TOKEN_KEY = 'goppo_kahini_token';
@@ -84,18 +94,16 @@ const isAdminUploadedVisual = (story: StoryItem): boolean =>
   !SEED_VISUAL_IDS.has(story.id) ||
   Date.parse(story.updatedAt || '0') > Date.parse('2026-11-05T00:00:00.000Z');
 
-const parseStoryIdFromLocation = (): string | null => {
-  if (typeof window === 'undefined') return null;
-  const pathMatch = window.location.pathname.match(/^\/story\/([^/]+)\/?$/);
-  if (pathMatch?.[1]) {
-    try {
-      return decodeURIComponent(pathMatch[1]);
-    } catch {
-      return pathMatch[1];
-    }
+const resolveStoryLanguageForRoute = (route: ActiveRoute, storyList: StoryItem[]): Language | null => {
+  if (route.view === 'story') {
+    const matched = storyList.find((s) => s.id === route.storyId);
+    return matched ? matched.language : null;
   }
-  const params = new URLSearchParams(window.location.search);
-  return params.get('story');
+  if (route.view === 'episode') {
+    const found = findStoryByEpisodeId(route.episodeId, storyList);
+    return found ? found.story.language : null;
+  }
+  return null;
 };
 
 const isAutomatedCrawler = (): boolean => {
@@ -108,10 +116,14 @@ const isAutomatedCrawler = (): boolean => {
 
 export default function App() {
   const [language, setLanguage] = useState<Language>(() => {
-    const deepId = parseStoryIdFromLocation();
-    if (deepId) {
-      const matched = INITIAL_STORIES.find((s) => s.id === deepId);
-      if (matched) return matched.language;
+    if (typeof window !== 'undefined') {
+      const initialRoute = parseLocationToRoute(
+        window.location.pathname,
+        window.location.search,
+        INITIAL_STORIES,
+      );
+      const matchedLang = resolveStoryLanguageForRoute(initialRoute, INITIAL_STORIES);
+      if (matchedLang) return matchedLang;
     }
     const saved = localStorage.getItem(STORAGE_LANG_KEY);
     return saved === 'hi' ? 'hi' : 'bn';
@@ -180,21 +192,24 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [activeRoute, setActiveRoute] = useState<ActiveRoute>(() => {
-    const deepStoryId = parseStoryIdFromLocation();
-    if (deepStoryId) {
-      return { view: 'story', storyId: deepStoryId };
+    if (typeof window === 'undefined') {
+      return { view: 'home', category: 'audio' };
     }
-    return { view: 'home', category: 'audio' };
+    return parseLocationToRoute(
+      window.location.pathname,
+      window.location.search,
+      INITIAL_STORIES,
+    );
   });
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [showSplash, setShowSplash] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    if (parseStoryIdFromLocation() || isAutomatedCrawler()) return false;
-    try {
-      if (sessionStorage.getItem('goppo_splash_seen') === '1') return false;
-      sessionStorage.setItem('goppo_splash_seen', '1');
-    } catch {}
-    return true;
+    if (typeof window === 'undefined' || isAutomatedCrawler()) return false;
+    const initialRoute = parseLocationToRoute(
+      window.location.pathname,
+      window.location.search,
+      INITIAL_STORIES,
+    );
+    return initialRoute.view === 'home';
   });
 
   // Audio Player State
@@ -348,12 +363,23 @@ export default function App() {
       setOrders(fetchedOrders);
       setProgress(fetchedProgress);
 
-      // Match deep-linked story language if opened directly via /story/<id> or ?story=<id>
-      const deepId = parseStoryIdFromLocation();
-      if (deepId) {
-        const found = storiesData.find((s) => s.id === deepId);
-        if (found) {
-          setLanguage(found.language);
+      // Match deep-linked story/episode language & resolve episode storyId after catalog hydration
+      if (typeof window !== 'undefined') {
+        const currentRoute = parseLocationToRoute(
+          window.location.pathname,
+          window.location.search,
+          storiesData,
+        );
+        const deepLang = resolveStoryLanguageForRoute(currentRoute, storiesData);
+        if (deepLang) {
+          setLanguage(deepLang);
+        }
+        if (currentRoute.view === 'episode' && currentRoute.storyId) {
+          setActiveRoute((prev) =>
+            prev.view === 'episode' && prev.episodeId === currentRoute.episodeId
+              ? currentRoute
+              : prev,
+          );
         }
       }
       setCatalogHydrated(true);
@@ -443,7 +469,7 @@ export default function App() {
   useEffect(() => {
     const isAdFree = user?.membership.status === 'ACTIVE' || activeRoute.view === 'admin';
     const currentPageKey =
-      activeRoute.view === 'story'
+      activeRoute.view === 'story' || activeRoute.view === 'episode'
         ? 'story_details'
         : activeRoute.view === 'all_stories' || activeRoute.view === 'npass'
           ? 'catalog'
@@ -530,7 +556,12 @@ export default function App() {
     if (activeRoute.view === 'story') {
       const currentStory = stories.find((s) => s.id === activeRoute.storyId);
       if (currentStory && currentStory.language !== nextLang) {
-        setActiveRoute({ view: 'home', category: 'audio' });
+        navigateTo({ view: 'home', category: 'audio' });
+      }
+    } else if (activeRoute.view === 'episode') {
+      const found = findStoryByEpisodeId(activeRoute.episodeId, stories);
+      if (found && found.story.language !== nextLang) {
+        navigateTo({ view: 'home', category: 'audio' });
       }
     }
   };
@@ -633,28 +664,54 @@ export default function App() {
     return visiblePublishedStories[0] || null;
   }, [visiblePublishedStories]);
 
-  // Browser history synchronization for /story/<id>, legacy ?story=<id>, and home routes
+  const storiesRef = useRef<StoryItem[]>(stories);
+  useEffect(() => {
+    storiesRef.current = stories;
+  }, [stories]);
+
+  const navigateTo = (
+    nextRoute: ActiveRoute,
+    options?: { replace?: boolean; scrollTop?: boolean },
+  ) => {
+    setActiveRoute(nextRoute);
+    if (typeof window !== 'undefined') {
+      const targetPath = getRoutePath(nextRoute, storiesRef.current);
+      const currentFull = `${window.location.pathname}${window.location.search}`;
+      if (currentFull !== targetPath) {
+        if (options?.replace) {
+          window.history.replaceState({}, '', targetPath);
+        } else {
+          window.history.pushState({}, '', targetPath);
+        }
+      }
+    }
+    if (options?.scrollTop !== false && typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  // Browser Back/Forward history synchronization for all section, policy, story, series, video, and episode URLs
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const onPopState = () => {
-      const deepId = parseStoryIdFromLocation();
-      if (deepId) {
-        setActiveRoute({ view: 'story', storyId: deepId });
-      } else {
-        setActiveRoute({ view: 'home', category: 'audio' });
+      const parsed = parseLocationToRoute(
+        window.location.pathname,
+        window.location.search,
+        storiesRef.current,
+      );
+      setActiveRoute(parsed);
+      const matchedLang = resolveStoryLanguageForRoute(parsed, storiesRef.current);
+      if (matchedLang) {
+        setLanguage(matchedLang);
       }
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
-  // Dynamic SEO metadata, canonical URL, and Schema.org JSON-LD synchronization
+  // Dynamic SEO metadata, canonical URL, and Schema.org JSON-LD synchronization for ALL routes
   useEffect(() => {
     if (typeof window === 'undefined' || typeof document === 'undefined') return;
-    const activeStory =
-      activeRoute.view === 'story'
-        ? stories.find((s) => s.id === activeRoute.storyId)
-        : undefined;
 
     const baseOrigin = window.location.origin;
     const baseTitle = 'Goppo Kahini – Bengali & Hindi Audio Stories & Films';
@@ -662,38 +719,146 @@ export default function App() {
       'Stream original Bengali and Hindi audio stories, animations, and films on Goppo Kahini. Listen to free previews or unlock ad-free stories anytime.';
     const defaultOgImage = `${baseOrigin}/assets/aistudio/Glossy_Red_Infinity_Ribbon_Logo_2028e914.png`;
 
-    const nextTitle = activeStory
-      ? `${activeStory.title} – Goppo Kahini`
-      : baseTitle;
-    const nextDescription = activeStory
-      ? `${activeStory.subtitle ? `${activeStory.subtitle}. ` : ''}${activeStory.synopsis}`.slice(0, 158)
-      : baseDescription;
-    const canonicalUrl = activeStory
-      ? `${baseOrigin}/story/${encodeURIComponent(activeStory.id)}`
-      : `${baseOrigin}/`;
+    const activeStory =
+      activeRoute.view === 'story'
+        ? stories.find((s) => s.id === activeRoute.storyId)
+        : activeRoute.view === 'episode'
+          ? findStoryByEpisodeId(activeRoute.episodeId, stories)?.story
+          : undefined;
+    const activeEpisode =
+      activeRoute.view === 'episode'
+        ? findStoryByEpisodeId(activeRoute.episodeId, stories)?.episode
+        : undefined;
 
+    let nextTitle = baseTitle;
+    let nextDescription = baseDescription;
+    let canonicalPath = '/';
+    let ogType = 'website';
     let ogImageUrl = defaultOgImage;
-    if (activeStory) {
+    let ogLocale = language === 'hi' ? 'hi_IN' : 'bn_IN';
+    let jsonLdPayload: Record<string, unknown> | null = null;
+
+    if (activeRoute.view === 'episode' && activeStory && activeEpisode) {
+      canonicalPath = getEpisodePath(activeEpisode);
+      nextTitle = `${activeEpisode.title} – ${activeStory.title} – Goppo Kahini`;
+      nextDescription = (
+        activeEpisode.synopsis ||
+        `${activeStory.title}: ${activeStory.synopsis}`
+      ).slice(0, 158);
+      ogType = 'article';
+      ogLocale = activeStory.language === 'hi' ? 'hi_IN' : 'bn_IN';
       const resolvedArt = resolveArtworkUrl(activeStory.coverArt);
       if (resolvedArt) {
-        if (resolvedArt.startsWith('http://') || resolvedArt.startsWith('https://')) {
-          ogImageUrl = resolvedArt;
-        } else if (resolvedArt.startsWith('/')) {
-          ogImageUrl = `${baseOrigin}${resolvedArt}`;
+        ogImageUrl =
+          resolvedArt.startsWith('http://') || resolvedArt.startsWith('https://')
+            ? resolvedArt
+            : resolvedArt.startsWith('/')
+              ? `${baseOrigin}${resolvedArt}`
+              : defaultOgImage;
+      }
+      jsonLdPayload = {
+        '@context': 'https://schema.org',
+        '@type': activeStory.mediaType === 'video' ? 'VideoObject' : 'PodcastEpisode',
+        name: activeEpisode.title,
+        episodeNumber: activeEpisode.number,
+        description: activeEpisode.synopsis || activeStory.synopsis,
+        url: `${baseOrigin}${canonicalPath}`,
+        image: ogImageUrl,
+        inLanguage: activeStory.language === 'hi' ? 'hi' : 'bn',
+        partOfSeries: {
+          '@type': 'CreativeWorkSeries',
+          name: activeStory.title,
+          url: `${baseOrigin}${getStoryPath(activeStory)}`,
+        },
+        publisher: {
+          '@type': 'Organization',
+          name: 'Goppo Kahini',
+          url: baseOrigin,
+        },
+      };
+    } else if (activeRoute.view === 'story' && activeStory) {
+      canonicalPath = getStoryPath(activeStory);
+      nextTitle = `${activeStory.title} – Goppo Kahini`;
+      nextDescription = `${activeStory.subtitle ? `${activeStory.subtitle}. ` : ''}${activeStory.synopsis}`.slice(
+        0,
+        158,
+      );
+      ogType = 'article';
+      ogLocale = activeStory.language === 'hi' ? 'hi_IN' : 'bn_IN';
+      const resolvedArt = resolveArtworkUrl(activeStory.coverArt);
+      if (resolvedArt) {
+        ogImageUrl =
+          resolvedArt.startsWith('http://') || resolvedArt.startsWith('https://')
+            ? resolvedArt
+            : resolvedArt.startsWith('/')
+              ? `${baseOrigin}${resolvedArt}`
+              : defaultOgImage;
+      }
+      jsonLdPayload = {
+        '@context': 'https://schema.org',
+        '@type':
+          activeStory.category === 'films'
+            ? 'Movie'
+            : activeStory.category === 'animation'
+              ? 'TVSeries'
+              : 'CreativeWorkSeries',
+        name: activeStory.title,
+        headline: activeStory.subtitle || activeStory.title,
+        description: activeStory.synopsis,
+        url: `${baseOrigin}${canonicalPath}`,
+        image: ogImageUrl,
+        inLanguage: activeStory.language === 'hi' ? 'hi' : 'bn',
+        genre: activeStory.genre,
+        author: {
+          '@type': 'Person',
+          name: activeStory.writer || 'Goppo Kahini Studio',
+        },
+        publisher: {
+          '@type': 'Organization',
+          name: 'Goppo Kahini',
+          url: baseOrigin,
+        },
+      };
+    } else {
+      const staticSpec = findStaticSeoSpecByRoute(activeRoute);
+      if (staticSpec) {
+        canonicalPath = staticSpec.path;
+        nextTitle = staticSpec.title;
+        nextDescription = staticSpec.description;
+        if (activeRoute.view === 'page') {
+          const docData = (POLICIES[language] || POLICIES.bn)[activeRoute.page];
+          if (docData?.intro) {
+            nextDescription = docData.intro.slice(0, 158);
+          }
         }
+        jsonLdPayload = {
+          '@context': 'https://schema.org',
+          '@type': activeRoute.view === 'page' ? 'WebPage' : 'CollectionPage',
+          name: nextTitle,
+          description: nextDescription,
+          url: `${baseOrigin}${canonicalPath}`,
+          inLanguage: ['bn', 'hi', 'en'],
+          isPartOf: {
+            '@type': 'WebSite',
+            name: 'Goppo Kahini',
+            url: baseOrigin,
+          },
+        };
+      } else if (activeRoute.view === 'library') {
+        canonicalPath = activeRoute.initialTab === 'account' ? '/account' : '/library';
+        nextTitle =
+          activeRoute.initialTab === 'account'
+            ? 'অ্যাকাউন্ট ও লগইন | Account – Goppo Kahini'
+            : 'আমার লাইব্রেরি | My Library – Goppo Kahini';
+        nextDescription =
+          'Manage your Goppo Kahini listener profile, playback progress, and unlocked stories.';
+      } else if (activeRoute.view === 'admin') {
+        canonicalPath = '/admin';
+        nextTitle = 'Admin Studio – Goppo Kahini';
       }
     }
 
-    // Sync clean browser URL on in-app navigation while preserving legacy ?story= landing links
-    const currentSearchStory = new URLSearchParams(window.location.search).get('story');
-    if (activeRoute.view === 'story' && activeStory) {
-      const targetPath = `/story/${encodeURIComponent(activeStory.id)}`;
-      if (window.location.pathname !== targetPath && !currentSearchStory) {
-        window.history.pushState({ storyId: activeStory.id }, '', targetPath);
-      }
-    } else if (activeRoute.view !== 'story' && window.location.pathname.startsWith('/story/')) {
-      window.history.pushState({}, '', '/');
-    }
+    const canonicalUrl = `${baseOrigin}${canonicalPath}`;
 
     document.title = nextTitle;
 
@@ -703,14 +868,12 @@ export default function App() {
     };
 
     setMetaContent('meta[name="description"]', nextDescription);
+    setMetaContent('meta[property="og:type"]', ogType);
     setMetaContent('meta[property="og:title"]', nextTitle);
     setMetaContent('meta[property="og:description"]', nextDescription);
     setMetaContent('meta[property="og:url"]', canonicalUrl);
     setMetaContent('meta[property="og:image"]', ogImageUrl);
-    setMetaContent(
-      'meta[property="og:locale"]',
-      activeStory?.language === 'hi' ? 'hi_IN' : 'bn_IN',
-    );
+    setMetaContent('meta[property="og:locale"]', ogLocale);
     setMetaContent('meta[name="twitter:title"]', nextTitle);
     setMetaContent('meta[name="twitter:description"]', nextDescription);
     setMetaContent('meta[name="twitter:image"]', ogImageUrl);
@@ -724,43 +887,19 @@ export default function App() {
     canonicalEl.setAttribute('href', canonicalUrl);
 
     const existingStoryLd = document.getElementById('dynamic-story-jsonld');
-    if (activeStory) {
+    if (jsonLdPayload) {
       const ldScript =
         (existingStoryLd as HTMLScriptElement | null) || document.createElement('script');
       ldScript.id = 'dynamic-story-jsonld';
       ldScript.type = 'application/ld+json';
-      ldScript.textContent = JSON.stringify({
-        '@context': 'https://schema.org',
-        '@type':
-          activeStory.category === 'films'
-            ? 'Movie'
-            : activeStory.category === 'animation'
-              ? 'TVSeries'
-              : 'CreativeWorkSeries',
-        name: activeStory.title,
-        headline: activeStory.subtitle || activeStory.title,
-        description: activeStory.synopsis,
-        url: canonicalUrl,
-        image: ogImageUrl,
-        inLanguage: activeStory.language === 'hi' ? 'hi' : 'bn',
-        genre: activeStory.genre,
-        author: {
-          '@type': 'Person',
-          name: activeStory.writer || 'Goppo Kahini Studio',
-        },
-        publisher: {
-          '@type': 'Organization',
-          name: 'Goppo Kahini',
-          url: baseOrigin,
-        },
-      });
+      ldScript.textContent = JSON.stringify(jsonLdPayload);
       if (!existingStoryLd) {
         document.head.appendChild(ldScript);
       }
     } else if (existingStoryLd) {
       existingStoryLd.remove();
     }
-  }, [activeRoute, stories]);
+  }, [activeRoute, stories, language]);
 
   const handleSelectHeroStory = async (storyId: string) => {
     if (!authToken) return;
@@ -881,7 +1020,7 @@ export default function App() {
     setUser(null);
     setOrders([]);
     setProgress([]);
-    setActiveRoute({ view: 'home', category: 'audio' });
+    navigateTo({ view: 'home', category: 'audio' });
   };
 
   const activeTrackId = activeTrack
@@ -902,6 +1041,13 @@ export default function App() {
     switch (activeCollectionFilter) {
       case 'audio':
         return audioStories;
+      case 'videos':
+        return publishedLanguageStories.filter(
+          (s) =>
+            (s.category === 'animation' && isAdminUploadedVisual(s)) ||
+            (s.category === 'films' && isAdminUploadedVisual(s)) ||
+            (s.mediaType === 'video' && isAdminUploadedVisual(s)),
+        );
       case 'animation':
         return uploadedAnimationStories.length > 0
           ? uploadedAnimationStories
@@ -919,6 +1065,7 @@ export default function App() {
   }, [
     activeCollectionFilter,
     audioStories,
+    publishedLanguageStories,
     uploadedAnimationStories,
     uploadedFilmStories,
     animationVisualStories,
@@ -931,6 +1078,7 @@ export default function App() {
     switch (activeCollectionFilter) {
       case 'audio':
         return `${t.categories.audio} — ${t.languageName}`;
+      case 'videos':
       case 'animation':
       case 'films':
         return `${t.racks.animationVisual} — ${t.languageName}`;
@@ -994,10 +1142,7 @@ export default function App() {
         t={t}
         categories={categories}
         activeRoute={activeRoute}
-        onNavigate={(r) => {
-          setActiveRoute(r);
-          window.scrollTo({ top: 0, behavior: 'smooth' });
-        }}
+        onNavigate={(r) => navigateTo(r)}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         user={user}
@@ -1064,7 +1209,7 @@ export default function App() {
                     progressItem={getStoryProgress(story.id, progress)}
                     onOpenDetails={(id) => {
                       setSearchQuery('');
-                      setActiveRoute({ view: 'story', storyId: id });
+                      navigateTo({ view: 'story', storyId: id });
                     }}
                     onBuyTicket={handleBuyTicket}
                     onPlayTrailer={handlePlayTrailer}
@@ -1093,7 +1238,7 @@ export default function App() {
                     }
                     onBuyTicket={handleBuyTicket}
                     onOpenDetails={(storyId) =>
-                      setActiveRoute({ view: 'story', storyId })
+                      navigateTo({ view: 'story', storyId })
                     }
                     onSelectHeroStory={handleSelectHeroStory}
                     onShare={(s) => setHeroShareStory(s)}
@@ -1103,38 +1248,50 @@ export default function App() {
                 {/* Quick Filter Strip */}
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex items-center gap-2 overflow-x-auto no-scrollbar max-w-full">
-                    <button
-                      type="button"
-                      onClick={() => setActiveRoute({ view: 'all_stories', category: 'audio' })}
+                    <a
+                      href="/audio-series"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        navigateTo({ view: 'all_stories', category: 'audio' });
+                      }}
                       className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.07] text-xs sm:text-sm font-medium text-[#F5F2EB] whitespace-nowrap shrink-0 cursor-pointer transition-colors"
                     >
                       <Headphones className="h-4 w-4 text-[#EF4444]" />
                       <span>{t.categories.audio}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setActiveRoute({ view: 'all_stories', category: 'animation' })}
+                    </a>
+                    <a
+                      href="/videos"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        navigateTo({ view: 'all_stories', category: 'videos' });
+                      }}
                       className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.07] text-xs sm:text-sm font-medium text-[#F5F2EB] whitespace-nowrap shrink-0 cursor-pointer transition-colors"
                     >
                       <Film className="h-4 w-4 text-[#EF4444]" />
                       <span>{t.nav.animation}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setActiveRoute({ view: 'all_stories', category: 'free' })}
+                    </a>
+                    <a
+                      href="/free-stories"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        navigateTo({ view: 'all_stories', category: 'free' });
+                      }}
                       className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-xs sm:text-sm font-medium text-emerald-300 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
                     >
                       <Sparkles className="h-4 w-4 text-emerald-400" />
                       <span>{t.nav.free}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setActiveRoute({ view: 'all_stories', category: 'premium' })}
+                    </a>
+                    <a
+                      href="/premium"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        navigateTo({ view: 'all_stories', category: 'premium' });
+                      }}
                       className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/30 text-xs sm:text-sm font-medium text-amber-300 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
                     >
                       <Crown className="h-4 w-4 text-amber-400" />
                       <span>{t.nav.premium}</span>
-                    </button>
+                    </a>
 
                     {adSettings?.smartlinkUrl &&
                       user?.membership?.status !== 'ACTIVE' &&
@@ -1152,13 +1309,16 @@ export default function App() {
                       )}
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => setActiveRoute({ view: 'all_stories', category: 'all' })}
+                  <a
+                    href="/stories"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigateTo({ view: 'all_stories', category: 'all' });
+                    }}
                     className="text-xs sm:text-sm font-semibold text-red-400 hover:text-red-300 transition-colors cursor-pointer"
                   >
                     {t.cards.viewAll} ({visiblePublishedStories.length}) →
-                  </button>
+                  </a>
                 </div>
 
                 {/* Home Ad Slot 1: Top (Below Hero & Quick Filter Strip) */}
@@ -1178,15 +1338,16 @@ export default function App() {
                           {t.racks.continueListening}
                         </h2>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setActiveRoute({ view: 'library', initialTab: 'continue' })
-                        }
+                      <a
+                        href="/library"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          navigateTo({ view: 'library', initialTab: 'continue' });
+                        }}
                         className="text-xs font-semibold text-[#EF4444] hover:text-red-300 cursor-pointer"
                       >
                         {t.cards.viewAll} →
-                      </button>
+                      </a>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
@@ -1195,16 +1356,20 @@ export default function App() {
                           key={`${item.storyId}_${item.episodeId}`}
                           className="flex items-center gap-3.5 p-3 rounded-xl bg-white/[0.03] border border-white/[0.07]"
                         >
-                          <div
-                            onClick={() => setActiveRoute({ view: 'story', storyId: story.id })}
-                            className="h-16 w-14 rounded-lg overflow-hidden shrink-0 border border-white/[0.08] cursor-pointer"
+                          <a
+                            href={getStoryPath(story)}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              navigateTo({ view: 'story', storyId: story.id });
+                            }}
+                            className="h-16 w-14 rounded-lg overflow-hidden shrink-0 border border-white/[0.08] cursor-pointer block"
                           >
                             <ArtworkImage
                               srcKeyOrUrl={story.coverArt}
                               alt={story.title}
                               className="h-full w-full object-cover"
                             />
-                          </div>
+                          </a>
                           <div className="flex-1 min-w-0 space-y-1.5">
                             <p className="font-editorial text-sm font-bold text-[#F5F2EB] truncate">
                               {story.title}
@@ -1251,8 +1416,9 @@ export default function App() {
                   t={t}
                   user={user}
                   progress={progress}
-                  onViewAll={() => setActiveRoute({ view: 'all_stories', category: 'premium' })}
-                  onOpenDetails={(storyId) => setActiveRoute({ view: 'story', storyId })}
+                  viewAllHref="/premium"
+                  onViewAll={() => navigateTo({ view: 'all_stories', category: 'premium' })}
+                  onOpenDetails={(storyId) => navigateTo({ view: 'story', storyId })}
                   onBuyTicket={handleBuyTicket}
                   onPlayTrailer={handlePlayTrailer}
                 />
@@ -1272,8 +1438,9 @@ export default function App() {
                   t={t}
                   user={user}
                   progress={progress}
-                  onViewAll={() => setActiveRoute({ view: 'all_stories', category: 'audio' })}
-                  onOpenDetails={(storyId) => setActiveRoute({ view: 'story', storyId })}
+                  viewAllHref="/audio-series"
+                  onViewAll={() => navigateTo({ view: 'all_stories', category: 'audio' })}
+                  onOpenDetails={(storyId) => navigateTo({ view: 'story', storyId })}
                   onBuyTicket={handleBuyTicket}
                   onPlayTrailer={handlePlayTrailer}
                 />
@@ -1287,8 +1454,9 @@ export default function App() {
                     t={t}
                     user={user}
                     progress={progress}
-                    onViewAll={() => setActiveRoute({ view: 'all_stories', category: 'free' })}
-                    onOpenDetails={(storyId) => setActiveRoute({ view: 'story', storyId })}
+                    viewAllHref="/free-stories"
+                    onViewAll={() => navigateTo({ view: 'all_stories', category: 'free' })}
+                    onOpenDetails={(storyId) => navigateTo({ view: 'story', storyId })}
                     onBuyTicket={handleBuyTicket}
                     onPlayTrailer={handlePlayTrailer}
                   />
@@ -1316,42 +1484,55 @@ export default function App() {
                     </p>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                      {visiblePublishedStories.slice(0, 4).map((story) => (
-                        <div
-                          key={`free_preview_${story.id}`}
-                          className="flex items-center gap-3 p-3 rounded-xl bg-white/[0.03] border border-white/[0.07] hover:border-emerald-500/35 transition-colors"
-                        >
+                      {visiblePublishedStories.slice(0, 4).map((story) => {
+                        const storyHref = getStoryPath(story);
+                        return (
                           <div
-                            onClick={() => setActiveRoute({ view: 'story', storyId: story.id })}
-                            className="h-16 w-12 rounded-lg overflow-hidden shrink-0 border border-white/[0.08] cursor-pointer"
+                            key={`free_preview_${story.id}`}
+                            className="flex items-center gap-3 p-3 rounded-xl bg-white/[0.03] border border-white/[0.07] hover:border-emerald-500/35 transition-colors"
                           >
-                            <ArtworkImage
-                              srcKeyOrUrl={story.coverArt}
-                              alt={story.title}
-                              className="h-full w-full object-cover"
-                            />
-                          </div>
-                          <div className="min-w-0 flex-1 space-y-1">
-                            <span className="inline-block px-1.5 py-0.5 rounded bg-emerald-500/15 text-[10px] font-semibold text-emerald-300">
-                              {t.badges.freePreview} · {story.trailerDurationLabel}
-                            </span>
-                            <h3
-                              onClick={() => setActiveRoute({ view: 'story', storyId: story.id })}
-                              className="font-editorial text-sm font-bold text-[#F5F2EB] truncate cursor-pointer hover:text-emerald-300"
+                            <a
+                              href={storyHref}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                navigateTo({ view: 'story', storyId: story.id });
+                              }}
+                              className="h-16 w-12 rounded-lg overflow-hidden shrink-0 border border-white/[0.08] cursor-pointer block"
                             >
-                              {story.title}
-                            </h3>
-                            <button
-                              type="button"
-                              onClick={() => handlePlayTrailer(story)}
-                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-300 hover:text-emerald-200 cursor-pointer"
-                            >
-                              <Play className="h-3 w-3 fill-current" />
-                              <span>{t.hero.playTrailer}</span>
-                            </button>
+                              <ArtworkImage
+                                srcKeyOrUrl={story.coverArt}
+                                alt={story.title}
+                                className="h-full w-full object-cover"
+                              />
+                            </a>
+                            <div className="min-w-0 flex-1 space-y-1">
+                              <span className="inline-block px-1.5 py-0.5 rounded bg-emerald-500/15 text-[10px] font-semibold text-emerald-300">
+                                {t.badges.freePreview} · {story.trailerDurationLabel}
+                              </span>
+                              <h3 className="font-editorial text-sm font-bold text-[#F5F2EB] truncate hover:text-emerald-300">
+                                <a
+                                  href={storyHref}
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    navigateTo({ view: 'story', storyId: story.id });
+                                  }}
+                                  className="cursor-pointer"
+                                >
+                                  {story.title}
+                                </a>
+                              </h3>
+                              <button
+                                type="button"
+                                onClick={() => handlePlayTrailer(story)}
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-300 hover:text-emerald-200 cursor-pointer"
+                              >
+                                <Play className="h-3 w-3 fill-current" />
+                                <span>{t.hero.playTrailer}</span>
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </section>
                 )}
@@ -1370,8 +1551,9 @@ export default function App() {
                   t={t}
                   user={user}
                   progress={progress}
-                  onViewAll={() => setActiveRoute({ view: 'all_stories', category: 'animation' })}
-                  onOpenDetails={(storyId) => setActiveRoute({ view: 'story', storyId })}
+                  viewAllHref="/videos"
+                  onViewAll={() => navigateTo({ view: 'all_stories', category: 'videos' })}
+                  onOpenDetails={(storyId) => navigateTo({ view: 'story', storyId })}
                   onBuyTicket={handleBuyTicket}
                   onPlayTrailer={handlePlayTrailer}
                 />
@@ -1383,27 +1565,31 @@ export default function App() {
                   t={t}
                   user={user}
                   progress={progress}
-                  onViewAll={() => setActiveRoute({ view: 'all_stories', category: 'films' })}
-                  onOpenDetails={(storyId) => setActiveRoute({ view: 'story', storyId })}
+                  viewAllHref="/videos"
+                  onViewAll={() => navigateTo({ view: 'all_stories', category: 'videos' })}
+                  onOpenDetails={(storyId) => navigateTo({ view: 'story', storyId })}
                   onBuyTicket={handleBuyTicket}
                   onPlayTrailer={handlePlayTrailer}
                 />
               </div>
             )}
 
-            {/* VIEW 2: FILTERABLE CATALOG VIEW (All Stories / Audio / Animation-Video / Free / Premium) */}
+            {/* VIEW 2: FILTERABLE CATALOG VIEW (All Stories / Audio / Videos / Free / Premium) */}
             {(activeRoute.view === 'all_stories' || activeRoute.view === 'npass') && (
               <div className="space-y-6 pb-12">
                 <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-4">
                   <div className="space-y-1">
-                    <button
-                      type="button"
-                      onClick={() => setActiveRoute({ view: 'home', category: 'audio' })}
+                    <a
+                      href="/"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        navigateTo({ view: 'home', category: 'audio' });
+                      }}
                       className="inline-flex items-center gap-2 text-xs sm:text-sm text-[#B6ABA1] hover:text-[#F6F1E7] mb-1 cursor-pointer"
                     >
                       <ArrowLeft className="h-4 w-4" />
                       <span>{t.cards.backToHome}</span>
-                    </button>
+                    </a>
                     <h1 className="font-editorial text-2xl sm:text-3xl font-bold text-[#F6F1E7]">
                       {collectionTitle} ({catalogFilteredStories.length})
                     </h1>
@@ -1419,21 +1605,24 @@ export default function App() {
                     [
                       { id: 'all', label: t.nav.stories },
                       { id: 'audio', label: t.nav.audio },
-                      { id: 'animation', label: t.nav.animation },
+                      { id: 'videos', label: t.nav.animation },
                       { id: 'free', label: t.nav.free },
                       { id: 'premium', label: t.nav.premium },
                     ] as const
                   ).map((filterItem) => {
                     const isSelected =
                       activeCollectionFilter === filterItem.id ||
-                      (filterItem.id === 'animation' && activeCollectionFilter === 'films');
+                      (filterItem.id === 'videos' &&
+                        (activeCollectionFilter === 'animation' ||
+                          activeCollectionFilter === 'films'));
                     return (
-                      <button
+                      <a
                         key={filterItem.id}
-                        type="button"
-                        onClick={() =>
-                          setActiveRoute({ view: 'all_stories', category: filterItem.id })
-                        }
+                        href={getRoutePath({ view: 'all_stories', category: filterItem.id })}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          navigateTo({ view: 'all_stories', category: filterItem.id });
+                        }}
                         className={`px-3.5 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap shrink-0 transition-all cursor-pointer ${
                           isSelected
                             ? 'bg-gradient-to-r from-[#DC2626] to-[#B91C1C] text-white shadow-sm'
@@ -1441,7 +1630,7 @@ export default function App() {
                         }`}
                       >
                         {filterItem.label}
-                      </button>
+                      </a>
                     );
                   })}
                 </div>
@@ -1458,7 +1647,8 @@ export default function App() {
                     <h2 className="font-editorial text-xl font-bold text-[#F6F1E7]">
                       {activeCollectionFilter === 'free'
                         ? t.racks.freeStories
-                        : activeCollectionFilter === 'animation' ||
+                        : activeCollectionFilter === 'videos' ||
+                            activeCollectionFilter === 'animation' ||
                             activeCollectionFilter === 'films'
                           ? t.racks.animationVisual
                           : t.cards.emptyCollectionTitle}
@@ -1466,24 +1656,27 @@ export default function App() {
                     <p className="text-sm text-[#B6ABA1] max-w-xl mx-auto">
                       {activeCollectionFilter === 'free'
                         ? t.racks.emptyFreeStoriesNote
-                        : activeCollectionFilter === 'animation' ||
+                        : activeCollectionFilter === 'videos' ||
+                            activeCollectionFilter === 'animation' ||
                             activeCollectionFilter === 'films'
                           ? t.racks.emptyVisualSlotsNote
                           : t.cards.emptyCollectionBody}
                     </p>
                     {(activeCollectionFilter === 'free' ||
+                      activeCollectionFilter === 'videos' ||
                       activeCollectionFilter === 'animation' ||
                       activeCollectionFilter === 'films') && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setActiveRoute({ view: 'all_stories', category: 'all' })
-                        }
+                      <a
+                        href="/stories"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          navigateTo({ view: 'all_stories', category: 'all' });
+                        }}
                         className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.1] text-xs font-semibold text-[#F5F2EB] cursor-pointer"
                       >
                         <Ticket className="h-3.5 w-3.5 text-[#EF4444]" />
                         <span>{t.cards.viewAll}</span>
-                      </button>
+                      </a>
                     )}
                   </div>
                 ) : (
@@ -1506,7 +1699,7 @@ export default function App() {
                         exhaustedListens={hasExhaustedListens(user, story.id)}
                         progressItem={getStoryProgress(story.id, progress)}
                         onOpenDetails={(storyId) =>
-                          setActiveRoute({ view: 'story', storyId })
+                          navigateTo({ view: 'story', storyId })
                         }
                         onBuyTicket={handleBuyTicket}
                         onPlayTrailer={handlePlayTrailer}
@@ -1517,7 +1710,7 @@ export default function App() {
               </div>
             )}
 
-            {/* VIEW 3: STORY DETAILS & EPISODES */}
+            {/* VIEW 3: STORY / SERIES / VIDEO DETAILS & EPISODES */}
             {activeRoute.view === 'story' && (() => {
               const targetStory = stories.find((s) => s.id === activeRoute.storyId);
               if (!targetStory && !catalogHydrated) {
@@ -1532,13 +1725,16 @@ export default function App() {
                 return (
                   <div className="py-16 text-center space-y-4">
                     <p className="text-base text-[#B6ABA1]">{t.cards.emptyCollectionTitle}</p>
-                    <button
-                      type="button"
-                      onClick={() => setActiveRoute({ view: 'home', category: 'audio' })}
-                      className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#DC2626] to-[#B91C1C] text-white text-sm font-semibold cursor-pointer shadow-md shadow-red-950/30"
+                    <a
+                      href="/"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        navigateTo({ view: 'home', category: 'audio' });
+                      }}
+                      className="inline-block px-4 py-2 rounded-xl bg-gradient-to-r from-[#DC2626] to-[#B91C1C] text-white text-sm font-semibold cursor-pointer shadow-md shadow-red-950/30"
                     >
                       {t.cards.backToHome}
-                    </button>
+                    </a>
                   </div>
                 );
               }
@@ -1551,7 +1747,10 @@ export default function App() {
                   activeTrackId={activeTrackId}
                   isPlaying={isPlaying}
                   adSettings={adSettings}
-                  onBack={() => setActiveRoute({ view: 'home', category: 'audio' })}
+                  onBack={() => navigateTo({ view: 'home', category: 'audio' })}
+                  onOpenEpisode={(s, ep) =>
+                    navigateTo({ view: 'episode', storyId: s.id, episodeId: ep.id })
+                  }
                   onPlayTrailer={handlePlayTrailer}
                   onPlayEpisode={(s, ep) => handlePlayEpisode(s, ep, 0)}
                   onEpisodeComplete={handleEpisodeComplete}
@@ -1559,6 +1758,66 @@ export default function App() {
                 />
               );
             })()}
+
+            {/* VIEW 3B: DEDICATED EPISODE DETAILS PAGE (/episode/:id) */}
+            {activeRoute.view === 'episode' && (() => {
+              const found = findStoryByEpisodeId(activeRoute.episodeId, stories);
+              if (!found && !catalogHydrated) {
+                return (
+                  <div className="py-24 flex flex-col items-center justify-center space-y-4">
+                    <div className="h-9 w-9 rounded-full border-2 border-[#EF4444] border-t-transparent animate-spin" />
+                    <p className="text-sm text-[#A69E95] tracking-wide">Goppo Kahini...</p>
+                  </div>
+                );
+              }
+              if (!found) {
+                return (
+                  <div className="py-16 text-center space-y-4">
+                    <p className="text-base text-[#B6ABA1]">{t.cards.emptyCollectionTitle}</p>
+                    <a
+                      href="/stories"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        navigateTo({ view: 'all_stories', category: 'all' });
+                      }}
+                      className="inline-block px-4 py-2 rounded-xl bg-gradient-to-r from-[#DC2626] to-[#B91C1C] text-white text-sm font-semibold cursor-pointer shadow-md shadow-red-950/30"
+                    >
+                      {t.nav.stories}
+                    </a>
+                  </div>
+                );
+              }
+              return (
+                <EpisodeDetailsView
+                  story={found.story}
+                  episode={found.episode}
+                  t={t}
+                  user={user}
+                  progress={progress}
+                  activeTrackId={activeTrackId}
+                  isPlaying={isPlaying}
+                  adSettings={adSettings}
+                  onOpenStory={(storyId) => navigateTo({ view: 'story', storyId })}
+                  onOpenEpisode={(storyId, episodeId) =>
+                    navigateTo({ view: 'episode', storyId, episodeId })
+                  }
+                  onPlayTrailer={handlePlayTrailer}
+                  onPlayEpisode={(s, ep) => handlePlayEpisode(s, ep, 0)}
+                  onEpisodeComplete={handleEpisodeComplete}
+                  onBuyTicket={handleBuyTicket}
+                />
+              );
+            })()}
+
+            {/* VIEW 3C: DEDICATED INFO & POLICY PAGES (/about, /contact, /privacy-policy, etc.) */}
+            {activeRoute.view === 'page' && (
+              <InfoPageView
+                page={activeRoute.page}
+                language={language}
+                t={t}
+                onNavigate={(r) => navigateTo(r)}
+              />
+            )}
 
             {/* VIEW 4: USER LIBRARY & ACCOUNT */}
             {activeRoute.view === 'library' && (
@@ -1581,7 +1840,7 @@ export default function App() {
                 }}
                 onLogout={handleLogout}
                 onOpenDetails={(storyId) =>
-                  setActiveRoute({ view: 'story', storyId })
+                  navigateTo({ view: 'story', storyId })
                 }
                 onBuyTicket={handleBuyTicket}
                 onPlayTrailer={handlePlayTrailer}
@@ -1593,7 +1852,7 @@ export default function App() {
                     handlePlayEpisode(story, ep, pos);
                   }
                 }}
-                onOpenAdmin={() => setActiveRoute({ view: 'admin' })}
+                onOpenAdmin={() => navigateTo({ view: 'admin' })}
               />
             )}
 
@@ -1623,10 +1882,7 @@ export default function App() {
                   setCategories(payload.categories);
                 }}
                 onAdminLogout={handleLogout}
-                onSwitchToLiveSite={() => {
-                  setActiveRoute({ view: 'home', category: 'audio' });
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
-                }}
+                onSwitchToLiveSite={() => navigateTo({ view: 'home', category: 'audio' })}
               />
             )}
           </>
@@ -1637,13 +1893,9 @@ export default function App() {
         language={language}
         onChangeLanguage={handleLanguageChange}
         t={t}
-        onNavigate={(r) => {
-          setActiveRoute(r);
-          window.scrollTo({ top: 0, behavior: 'smooth' });
-        }}
+        onNavigate={(r) => navigateTo(r)}
         onOpenPolicy={(tab) => {
-          setPolicyTab(tab);
-          setPolicyOpen(true);
+          navigateTo({ view: 'page', page: tab });
         }}
       />
 
@@ -1655,7 +1907,7 @@ export default function App() {
           title={heroShareStory.title}
           url={
             typeof window !== 'undefined'
-              ? `${window.location.origin}/story/${encodeURIComponent(heroShareStory.id)}`
+              ? `${window.location.origin}${getStoryPath(heroShareStory)}`
               : undefined
           }
           t={t}
@@ -1683,7 +1935,7 @@ export default function App() {
         onClose={() => setCheckoutTarget((prev) => ({ ...prev, open: false }))}
         onRequireLogin={() => {
           setCheckoutTarget((prev) => ({ ...prev, open: false }));
-          setActiveRoute({ view: 'library', initialTab: 'account' });
+          navigateTo({ view: 'library', initialTab: 'account' });
         }}
         onOrderUpdated={({ user: updatedUser, orders: updatedOrders }) => {
           if (updatedUser) setUser(updatedUser);
