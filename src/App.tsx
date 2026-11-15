@@ -187,6 +187,10 @@ export default function App() {
     } catch {}
     return createDefaultAdSettings('published');
   });
+  const injectedAdSignaturesRef = useRef<{ social: string; popunder: string }>({
+    social: '',
+    popunder: '',
+  });
   const [loading, setLoading] = useState<boolean>(false);
   const [catalogHydrated, setCatalogHydrated] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -342,7 +346,12 @@ export default function App() {
         if (firestoreAds) {
           const fsTime = firestoreAds.publishedAt ? Date.parse(firestoreAds.publishedAt) : 0;
           const apiTime = latestAds?.publishedAt ? Date.parse(latestAds.publishedAt) : 0;
-          if (!latestAds || fsTime >= apiTime || firestoreAds.version >= latestAds.version) {
+          if (
+            !latestAds ||
+            fsTime >= apiTime ||
+            firestoreAds.version >= latestAds.version ||
+            (firestoreAds.enabled && !latestAds.enabled && apiTime === 0)
+          ) {
             latestAds = firestoreAds;
           }
         }
@@ -416,7 +425,8 @@ export default function App() {
       }
       try {
         const res = await fetch('/api/ads/published', { cache: 'no-store' });
-        if (res.ok) {
+        const ct = res.headers.get('content-type') || '';
+        if (res.ok && ct.includes('application/json')) {
           const data = await res.json();
           if (data?.adSettings) {
             applyPublishedAds(normalizeAdSettings(data.adSettings, 'published'));
@@ -467,7 +477,21 @@ export default function App() {
 
   // Dynamic Social Bar & Popunder Script Injection (respects Master, Page, Device, and Ad-Free status)
   useEffect(() => {
-    const isAdFree = user?.membership.status === 'ACTIVE' || activeRoute.view === 'admin';
+    const activeStoryId =
+      activeRoute.view === 'story'
+        ? activeRoute.storyId
+        : activeRoute.view === 'episode'
+          ? activeRoute.storyId
+          : '';
+    const activeStory = activeStoryId ? stories.find((s) => s.id === activeStoryId) : undefined;
+    const isPurchasedStoryPage = Boolean(
+      activeStory && activeStory.ticketPriceInr > 0 && hasVerifiedStoryAccess(user, activeStory),
+    );
+    const isAdFree =
+      user?.membership.status === 'ACTIVE' ||
+      activeRoute.view === 'admin' ||
+      isPurchasedStoryPage;
+
     const currentPageKey =
       activeRoute.view === 'story' || activeRoute.view === 'episode'
         ? 'story_details'
@@ -476,16 +500,15 @@ export default function App() {
           : 'home';
     const pageAllowed = adSettings.pages?.[currentPageKey] ?? true;
 
-    const cleanupInjectedScripts = () => {
-      document.querySelectorAll('[data-gk-ad-script="true"]').forEach((el) => el.remove());
+    const cleanupByRole = (role: 'social_bar' | 'popunder') => {
+      document.querySelectorAll(`[data-gk-ad-role="${role}"]`).forEach((el) => el.remove());
     };
 
-    if (isAdFree || !adSettings.enabled || !pageAllowed) {
-      cleanupInjectedScripts();
-      return;
-    }
-
-    const injectRawScriptSnippet = (id: string, snippet: string) => {
+    const injectRawScriptSnippet = (
+      id: string,
+      role: 'social_bar' | 'popunder',
+      snippet: string,
+    ) => {
       if (!snippet || !snippet.trim()) return;
       try {
         const wrapper = document.createElement('div');
@@ -497,6 +520,7 @@ export default function App() {
             const fresh = document.createElement('script');
             fresh.id = i === 0 ? id : `${id}-${i}`;
             fresh.setAttribute('data-gk-ad-script', 'true');
+            fresh.setAttribute('data-gk-ad-role', role);
             Array.from(original.attributes).forEach((attr) => {
               if (attr.name !== 'id') {
                 fresh.setAttribute(attr.name, attr.value);
@@ -511,44 +535,70 @@ export default function App() {
           }
         } else {
           const trimmed = snippet.trim();
-          if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('//')) {
-            const fresh = document.createElement('script');
-            fresh.id = id;
-            fresh.setAttribute('data-gk-ad-script', 'true');
+          const fresh = document.createElement('script');
+          fresh.id = id;
+          fresh.setAttribute('data-gk-ad-script', 'true');
+          fresh.setAttribute('data-gk-ad-role', role);
+          if (
+            trimmed.startsWith('http://') ||
+            trimmed.startsWith('https://') ||
+            trimmed.startsWith('//')
+          ) {
             fresh.src = trimmed;
             fresh.async = true;
-            document.body.appendChild(fresh);
+          } else {
+            fresh.textContent = trimmed;
           }
+          document.body.appendChild(fresh);
         }
       } catch {
         // Safe failover
       }
     };
 
-    cleanupInjectedScripts();
+    const nextSocialSnippet =
+      !isAdFree &&
+      adSettings.enabled &&
+      pageAllowed &&
+      isAdAllowedOnDevice(adSettings, 'social_bar', isMobileDevice)
+        ? (isMobileDevice
+            ? adSettings.socialBarMobileScript || adSettings.socialBarScript
+            : adSettings.socialBarScript || adSettings.socialBarMobileScript
+          ).trim()
+        : '';
 
-    if (isAdAllowedOnDevice(adSettings, 'social_bar', isMobileDevice)) {
-      const socialSnippet = isMobileDevice
-        ? adSettings.socialBarMobileScript || adSettings.socialBarScript
-        : adSettings.socialBarScript;
-      if (socialSnippet) {
-        injectRawScriptSnippet('gk-ad-social-bar', socialSnippet);
+    const nextPopunderSnippet =
+      !isAdFree &&
+      adSettings.enabled &&
+      pageAllowed &&
+      isAdAllowedOnDevice(adSettings, 'popunder', isMobileDevice)
+        ? (isMobileDevice
+            ? adSettings.popunderMobileScript || adSettings.popunderScript
+            : adSettings.popunderScript || adSettings.popunderMobileScript
+          ).trim()
+        : '';
+
+    const nextSocialSig = nextSocialSnippet ? `${isMobileDevice ? 'm' : 'd'}:${nextSocialSnippet}` : '';
+    const nextPopunderSig = nextPopunderSnippet
+      ? `${isMobileDevice ? 'm' : 'd'}:${nextPopunderSnippet}`
+      : '';
+
+    if (injectedAdSignaturesRef.current.social !== nextSocialSig) {
+      cleanupByRole('social_bar');
+      if (nextSocialSnippet) {
+        injectRawScriptSnippet('gk-ad-social-bar', 'social_bar', nextSocialSnippet);
       }
+      injectedAdSignaturesRef.current.social = nextSocialSig;
     }
 
-    if (isAdAllowedOnDevice(adSettings, 'popunder', isMobileDevice)) {
-      const popSnippet = isMobileDevice
-        ? adSettings.popunderMobileScript || adSettings.popunderScript
-        : adSettings.popunderScript;
-      if (popSnippet) {
-        injectRawScriptSnippet('gk-ad-popunder', popSnippet);
+    if (injectedAdSignaturesRef.current.popunder !== nextPopunderSig) {
+      cleanupByRole('popunder');
+      if (nextPopunderSnippet) {
+        injectRawScriptSnippet('gk-ad-popunder', 'popunder', nextPopunderSnippet);
       }
+      injectedAdSignaturesRef.current.popunder = nextPopunderSig;
     }
-
-    return () => {
-      cleanupInjectedScripts();
-    };
-  }, [adSettings, user, isMobileDevice, activeRoute.view]);
+  }, [adSettings, user, stories, isMobileDevice, activeRoute]);
 
   const handleLanguageChange = (nextLang: Language) => {
     if (nextLang === language) return;

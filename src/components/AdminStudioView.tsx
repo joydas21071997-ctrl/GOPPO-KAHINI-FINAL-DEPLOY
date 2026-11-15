@@ -186,6 +186,9 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       ? normalizeAdSettings(adSettings, 'published')
       : createDefaultAdSettings('published'),
   );
+  const [adFirestoreLiveStatus, setAdFirestoreLiveStatus] = useState<
+    'checking' | 'synced' | 'missing' | 'error'
+  >('checking');
   const [selectedAdTypeTab, setSelectedAdTypeTab] = useState<AdTypeKey>('banner_320x50');
 
   useEffect(() => {
@@ -294,69 +297,98 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     return false;
   };
 
-  // Load catalog overview for verified Admin or Editor
+  // Load catalog overview & synchronize latest Ad Settings (merging Express + Firestore)
   const fetchOverview = async (token = authToken) => {
+    let apiPublished: AdSettings | null = null;
+    let apiDraft: AdSettings | null = null;
+    let loadedFromServer = false;
+
     try {
       const res = await fetch('/api/admin/overview', {
+        cache: 'no-store',
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
-      if (res.ok) {
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
         const data = await res.json();
+        loadedFromServer = true;
         setStories(data.stories || []);
         setAllOrders(data.orders || []);
         setAllUsers(data.users || []);
         setAllEditors(data.editors || []);
         if (data.nPassPriceInr) setCustomNPassPrice(data.nPassPriceInr);
         if (data.adSettings) {
-          setPublishedAdSnapshot(normalizeAdSettings(data.adSettings, 'published'));
+          apiPublished = normalizeAdSettings(data.adSettings, 'published');
         }
         if (data.adDraftSettings || data.adSettings) {
-          setAdConfig(
-            normalizeAdSettings(data.adDraftSettings || data.adSettings, 'draft'),
-          );
+          apiDraft = normalizeAdSettings(data.adDraftSettings || data.adSettings, 'draft');
         }
-        return;
       }
     } catch {
-      // Non-blocking catch
+      // Static hosting or offline fallback below
     }
 
-    // Direct Firestore fallback for static Firebase Hosting deployments
     if (db) {
       try {
-        const storiesSnap = await getDocs(collection(db, 'stories'));
-        const loadedStories: StoryItem[] = [];
-        storiesSnap.forEach((d) => loadedStories.push(d.data() as StoryItem));
-        if (loadedStories.length > 0) {
-          setStories(loadedStories);
-        }
+        if (!loadedFromServer) {
+          const storiesSnap = await getDocs(collection(db, 'stories'));
+          const loadedStories: StoryItem[] = [];
+          storiesSnap.forEach((d) => loadedStories.push(d.data() as StoryItem));
+          if (loadedStories.length > 0) {
+            setStories(loadedStories);
+          }
 
-        const editorsSnap = await getDocs(collection(db, 'editors'));
-        const loadedEditors: EditorGrant[] = [];
-        editorsSnap.forEach((d) => loadedEditors.push(d.data() as EditorGrant));
-        setAllEditors(loadedEditors);
+          const editorsSnap = await getDocs(collection(db, 'editors'));
+          const loadedEditors: EditorGrant[] = [];
+          editorsSnap.forEach((d) => loadedEditors.push(d.data() as EditorGrant));
+          setAllEditors(loadedEditors);
 
-        const settingsSnap = await getDoc(doc(db, 'settings', 'platform'));
-        if (settingsSnap.exists() && settingsSnap.data().nPassMonthlyPriceInr) {
-          setCustomNPassPrice(settingsSnap.data().nPassMonthlyPriceInr);
+          const settingsSnap = await getDoc(doc(db, 'settings', 'platform'));
+          if (settingsSnap.exists() && settingsSnap.data().nPassMonthlyPriceInr) {
+            setCustomNPassPrice(settingsSnap.data().nPassMonthlyPriceInr);
+          }
         }
 
         const [draftFromFs, pubFromFs] = await Promise.all([
           fetchDraftAdsFromFirestore(),
           fetchPublishedAdsFromFirestore(),
         ]);
+
         if (pubFromFs) {
-          setPublishedAdSnapshot(pubFromFs);
+          setAdFirestoreLiveStatus('synced');
+        } else {
+          setAdFirestoreLiveStatus('missing');
         }
-        if (draftFromFs) {
-          setAdConfig(draftFromFs);
-        } else if (pubFromFs) {
-          setAdConfig(normalizeAdSettings({ ...pubFromFs, status: 'draft' }, 'draft'));
+
+        const fsPubTime = pubFromFs?.publishedAt ? Date.parse(pubFromFs.publishedAt) : 0;
+        const apiPubTime = apiPublished?.publishedAt ? Date.parse(apiPublished.publishedAt) : 0;
+        const chosenPublished =
+          pubFromFs && (!apiPublished || fsPubTime >= apiPubTime || pubFromFs.version >= apiPublished.version)
+            ? pubFromFs
+            : apiPublished;
+
+        if (chosenPublished) {
+          setPublishedAdSnapshot(chosenPublished);
         }
+
+        const fsDraftTime = draftFromFs?.updatedAt ? Date.parse(draftFromFs.updatedAt) : 0;
+        const apiDraftTime = apiDraft?.updatedAt ? Date.parse(apiDraft.updatedAt) : 0;
+        const chosenDraft =
+          draftFromFs && (!apiDraft || fsDraftTime >= apiDraftTime || draftFromFs.version >= apiDraft.version)
+            ? draftFromFs
+            : apiDraft || (chosenPublished ? normalizeAdSettings({ ...chosenPublished, status: 'draft' }, 'draft') : null);
+
+        if (chosenDraft) {
+          setAdConfig(chosenDraft);
+        }
+        return;
       } catch {
-        // Non-blocking
+        setAdFirestoreLiveStatus('error');
       }
     }
+
+    if (apiPublished) setPublishedAdSnapshot(apiPublished);
+    if (apiDraft) setAdConfig(apiDraft);
   };
 
   const handleSaveAdDraft = async () => {
@@ -366,6 +398,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
         { ...adConfig, status: 'draft', updatedAt: new Date().toISOString() },
         'draft',
       );
+      let serverSyncedFirestore = false;
 
       if (authToken) {
         try {
@@ -377,18 +410,20 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
             },
             body: JSON.stringify(savedDraft),
           });
-          if (res.ok) {
+          const ct = res.headers.get('content-type') || '';
+          if (res.ok && ct.includes('application/json')) {
             const data = await res.json();
             if (data.draftSettings) {
               savedDraft = normalizeAdSettings(data.draftSettings, 'draft');
             }
+            serverSyncedFirestore = Boolean(data.firestoreSynced);
           }
         } catch {
           // Static fallback continues to Firestore
         }
       }
 
-      if (isFirebaseConfigured && db && auth?.currentUser) {
+      if (isFirebaseConfigured && db && !serverSyncedFirestore) {
         savedDraft = await saveAdDraftToFirestore(savedDraft);
       }
 
@@ -399,7 +434,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     } catch (err) {
       setStatusBanner(
         err instanceof Error
-          ? `খসড়া সংরক্ষণ ত্রুটি: ${err.message.slice(0, 120)}`
+          ? `খসড়া সংরক্ষণ ত্রুটি: ${err.message.slice(0, 160)}`
           : 'খসড়া সংরক্ষণ করতে ত্রুটি হয়েছে।',
       );
     } finally {
@@ -418,6 +453,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
         publishedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
+      let serverSyncedFirestore = false;
 
       if (authToken) {
         try {
@@ -427,24 +463,39 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
               'Content-Type': 'application/json',
               Authorization: `Bearer ${authToken}`,
             },
-            body: JSON.stringify(targetConfig),
+            body: JSON.stringify({
+              ...targetConfig,
+              version: Math.max(publishedAdSnapshot.version || 0, targetConfig.version || 0),
+            }),
           });
-          if (res.ok) {
+          const ct = res.headers.get('content-type') || '';
+          if (res.ok && ct.includes('application/json')) {
             const data = await res.json();
             if (data.adSettings) {
               nextPublished = normalizeAdSettings(data.adSettings, 'published');
             }
+            serverSyncedFirestore = Boolean(data.firestoreSynced);
           }
         } catch {
           // Continue with Firestore publish
         }
       }
 
-      if (isFirebaseConfigured && db && auth?.currentUser) {
-        nextPublished = await publishAdSettingsToFirestore({
-          ...nextPublished,
-          version: Math.max(publishedAdSnapshot.version || 0, targetConfig.version || 0),
-        });
+      if (isFirebaseConfigured && db) {
+        if (!serverSyncedFirestore) {
+          nextPublished = await publishAdSettingsToFirestore({
+            ...nextPublished,
+            version: Math.max(publishedAdSnapshot.version || 0, targetConfig.version || 0),
+          });
+        }
+        const verifiedRemote = await fetchPublishedAdsFromFirestore();
+        if (verifiedRemote) {
+          nextPublished = verifiedRemote;
+          setAdFirestoreLiveStatus('synced');
+        } else {
+          setAdFirestoreLiveStatus('missing');
+          throw new Error('Firestore-এ প্রকাশনা যাচাই করা যায়নি। অনুগ্রহ করে পুনরায় লগইন করে চেষ্টা করুন।');
+        }
       }
 
       try {
@@ -458,13 +509,13 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       }
       setStatusBanner(
         nextPublished.enabled
-          ? `বিজ্ঞাপন সেটিংস (v${nextPublished.version}) সফলভাবে প্রকাশিত ও ওয়েবসাইট/PWA-তে লাইভ হয়েছে!`
+          ? `বিজ্ঞাপন সেটিংস (v${nextPublished.version}) সফলভাবে Firestore ও ওয়েবসাইট/PWA-তে লাইভ হয়েছে!`
           : `সমস্ত বিজ্ঞাপন ওয়েবসাইট ও PWA থেকে বন্ধ (Disable) করে প্রকাশ করা হয়েছে (v${nextPublished.version})।`,
       );
     } catch (err) {
       setStatusBanner(
         err instanceof Error
-          ? `বিজ্ঞাপন প্রকাশ করতে ত্রুটি: ${err.message.slice(0, 120)}`
+          ? `বিজ্ঞাপন প্রকাশ করতে ত্রুটি: ${err.message.slice(0, 180)}`
           : 'বিজ্ঞাপন প্রকাশ করতে ত্রুটি হয়েছে।',
       );
     } finally {
@@ -1452,11 +1503,9 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     ...(isOwnerAdmin || hasPermission('manage_categories')
       ? [{ id: 'platform_settings' as const, label: '⚙️ ক্যাটাগরি ও প্ল্যাটফর্ম সেটিংস' }]
       : []),
-    ...(isOwnerAdmin || hasPermission('manage_categories') || hasPermission('manage_stories')
-      ? [{ id: 'ad_management' as const, label: '📢 বিজ্ঞাপন ও স্লট সেটিংস' }]
-      : []),
     ...(isOwnerAdmin
       ? [
+          { id: 'ad_management' as const, label: '📢 বিজ্ঞাপন ও স্লট সেটিংস' },
           { id: 'editors_rbac' as const, label: `👑 এডিটর ও রোল (${allEditors.length})` },
           { id: 'firebase_hub' as const, label: '🔥 ফায়ারবেস ব্যাকএন্ড হাব' },
           { id: 'users_orders' as const, label: `👥 কাস্টমার ডেটা ও অর্ডার (${allUsers.length})` },
@@ -2625,8 +2674,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       )}
 
       {/* TAB: AD MONETIZATION & SLOTS SETTINGS */}
-      {effectiveTab === 'ad_management' &&
-        (isOwnerAdmin || hasPermission('manage_categories') || hasPermission('manage_stories')) && (
+      {effectiveTab === 'ad_management' && isOwnerAdmin && (
           <form onSubmit={handleSaveAds} className="space-y-6">
             {/* Header + Draft/Published Status Card */}
             <div className="p-6 rounded-2xl bg-gradient-to-b from-[#18131B] via-[#120F16] to-[#0A090C] border border-white/[0.08] shadow-xl space-y-4">
@@ -2694,12 +2742,12 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
 
               {/* Draft vs Published Live Status Strip */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
-                <div className="p-3.5 rounded-xl bg-[#0B090E] border border-white/[0.08] flex items-center justify-between">
+                <div className="p-3.5 rounded-xl bg-[#0B090E] border border-white/[0.08] flex items-center justify-between gap-3">
                   <div className="space-y-0.5">
                     <span className="text-[11px] uppercase tracking-wider text-[#A69E95]">
                       Published Live (ওয়েবসাইট + PWA)
                     </span>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span
                         className={`inline-flex items-center gap-1 text-xs font-bold ${
                           publishedAdSnapshot.enabled ? 'text-emerald-400' : 'text-amber-300'
@@ -2710,13 +2758,38 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                           ? `লাইভ চলছে (v${publishedAdSnapshot.version || 1})`
                           : `বর্তমানে বন্ধ আছে (v${publishedAdSnapshot.version || 1})`}
                       </span>
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded font-semibold ${
+                          adFirestoreLiveStatus === 'synced'
+                            ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25'
+                            : adFirestoreLiveStatus === 'missing'
+                            ? 'bg-red-500/15 text-red-300 border border-red-500/30'
+                            : 'bg-white/10 text-[#C8BFB5]'
+                        }`}
+                      >
+                        {adFirestoreLiveStatus === 'synced'
+                          ? 'Firestore সিঙ্ক ✓'
+                          : adFirestoreLiveStatus === 'missing'
+                          ? 'Firestore-এ এখনো প্রকাশিত হয়নি — এখনই Publish করুন'
+                          : 'যাচাই হচ্ছে...'}
+                      </span>
                     </div>
                   </div>
-                  <span className="text-[11px] font-mono-num text-[#9E968F]">
-                    {publishedAdSnapshot.publishedAt
-                      ? new Date(publishedAdSnapshot.publishedAt).toLocaleString('bn-BD')
-                      : 'অপ্রকাশিত'}
-                  </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-[11px] font-mono-num text-[#9E968F]">
+                      {publishedAdSnapshot.publishedAt
+                        ? new Date(publishedAdSnapshot.publishedAt).toLocaleString('bn-BD')
+                        : 'অপ্রকাশিত'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void fetchOverview()}
+                      className="p-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-[#C8BFB5] cursor-pointer"
+                      title="Firestore থেকে সর্বশেষ বিজ্ঞাপন সেটিংস রিফ্রেশ করুন"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-emerald-500/[0.07] border border-emerald-500/20 flex items-start gap-2.5">

@@ -30,7 +30,7 @@ export default defineConfig(() => {
           navigateFallbackDenylist: [/^\/api\//, /^\/firebase/, /^\/__/, /^\/robots\.txt$/, /^\/sitemap\.xml$/],
           runtimeCaching: [
             {
-              urlPattern: /^\/api\/.*/i,
+              urlPattern: ({ url }) => url.pathname.startsWith('/api/'),
               handler: 'NetworkOnly',
             },
             {

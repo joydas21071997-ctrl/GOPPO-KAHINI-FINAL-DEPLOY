@@ -27,7 +27,9 @@ import {
 import {
   deleteEditorFromFirestoreRest,
   deleteStoryFromFirestoreRest,
+  fetchPublishedAdSettingsFromFirestoreRest,
   hydrateCatalogFromFirestoreIfAvailable,
+  syncAdSettingsToFirestoreRest,
   syncCategoryToFirestoreRest,
   syncEditorToFirestoreRest,
   syncEntitlementToFirestoreRest,
@@ -424,6 +426,21 @@ async function startServer() {
     }
     if (updated) saveState();
   });
+  void fetchPublishedAdSettingsFromFirestoreRest().then((cloudAds) => {
+    if (!cloudAds) return;
+    const fsTime = cloudAds.publishedAt ? Date.parse(cloudAds.publishedAt) : 0;
+    const localTime = state.adSettings?.publishedAt ? Date.parse(state.adSettings.publishedAt) : 0;
+    const localVer = state.adSettings?.version || 1;
+    if (
+      (cloudAds.enabled && !state.adSettings?.enabled) ||
+      fsTime > localTime ||
+      cloudAds.version > localVer
+    ) {
+      state.adSettings = cloudAds;
+      state.adDraftSettings = normalizeAdSettings({ ...cloudAds, status: 'draft' }, 'draft');
+      saveState();
+    }
+  });
   const app = express();
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -474,35 +491,39 @@ async function startServer() {
   // ---------------------------------------------------------------------------
   app.post('/api/admin/ads/draft', async (req: Request, res: Response) => {
     const user = await resolveAuthenticatedUser(req);
-    if (!hasStaffPermission(user, 'manage_stories') && !hasStaffPermission(user, 'manage_categories')) {
-      res.status(403).json({ error: 'Permission required to save ad draft settings.' });
+    if (!user || user.role !== 'admin') {
+      res.status(403).json({ error: 'Owner/Administrator role required to save ad draft settings.' });
       return;
     }
 
     const nowIso = new Date().toISOString();
+    const actorUid = user.firebaseUid || user.id || 'admin';
     const nextDraft = normalizeAdSettings(
       {
         ...(req.body || {}),
         status: 'draft',
         updatedAt: nowIso,
-        updatedBy: user?.id || user?.email || 'admin',
+        updatedBy: actorUid,
       },
       'draft',
     );
     state.adDraftSettings = nextDraft;
     saveState();
-    res.json({ ok: true, draftSettings: state.adDraftSettings });
+    const bearer = extractBearerToken(req);
+    const firestoreSynced = await syncAdSettingsToFirestoreRest(nextDraft, 'draft', actorUid, bearer);
+    res.json({ ok: true, draftSettings: state.adDraftSettings, firestoreSynced });
   });
 
   const handlePublishAdsRoute = async (req: Request, res: Response) => {
     const user = await resolveAuthenticatedUser(req);
-    if (!hasStaffPermission(user, 'manage_stories') && !hasStaffPermission(user, 'manage_categories')) {
-      res.status(403).json({ error: 'Permission required to publish ad settings.' });
+    if (!user || user.role !== 'admin') {
+      res.status(403).json({ error: 'Owner/Administrator role required to publish ad settings.' });
       return;
     }
 
     const nowIso = new Date().toISOString();
-    const currentVersion = Math.max(0, state.adSettings?.version || 0);
+    const actorUid = user.firebaseUid || user.id || 'admin';
+    const currentVersion = Math.max(0, state.adSettings?.version || 0, Number(req.body?.version) || 0);
     const nextVersion = currentVersion + 1;
     const nextPublished = normalizeAdSettings(
       {
@@ -511,7 +532,7 @@ async function startServer() {
         version: nextVersion,
         publishedAt: nowIso,
         updatedAt: nowIso,
-        updatedBy: user?.id || user?.email || 'admin',
+        updatedBy: actorUid,
       },
       'published',
     );
@@ -521,10 +542,16 @@ async function startServer() {
       'draft',
     );
     saveState();
+    const bearer = extractBearerToken(req);
+    const [pubSynced] = await Promise.all([
+      syncAdSettingsToFirestoreRest(state.adSettings, 'published', actorUid, bearer),
+      syncAdSettingsToFirestoreRest(state.adDraftSettings, 'draft', actorUid, bearer),
+    ]);
     res.json({
       ok: true,
       adSettings: state.adSettings,
       draftSettings: state.adDraftSettings,
+      firestoreSynced: pubSynced,
     });
   };
 

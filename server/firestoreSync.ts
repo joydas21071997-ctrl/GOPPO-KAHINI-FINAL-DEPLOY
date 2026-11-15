@@ -1,5 +1,8 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { getFirebaseRuntimeConfig } from './firebaseAuth.ts';
 import type {
+  AdSettings,
   CategoryConfig,
   ContentCategory,
   EditorGrant,
@@ -8,6 +11,7 @@ import type {
   StoryTicketEntitlement,
   UserProfile,
 } from '../src/types/content.ts';
+import { normalizeAdSettings } from '../src/utils/adConfig.ts';
 
 type FirestoreValue =
   | { nullValue: null }
@@ -336,4 +340,106 @@ export async function hydrateCatalogFromFirestoreIfAvailable(): Promise<{
         : undefined,
     editors: editorsRaw.length > 0 ? (editorsRaw as unknown as EditorGrant[]) : undefined,
   };
+}
+
+export async function syncAdSettingsToFirestoreRest(
+  settings: AdSettings,
+  settingId: 'draft' | 'published',
+  actorUid: string,
+  bearerToken?: string,
+): Promise<boolean> {
+  const { projectId, databaseId } = getFirebaseRuntimeConfig();
+  const baseUrl = getDocBaseUrl();
+  const token = await resolveAuthToken(bearerToken);
+  if (!projectId || !baseUrl || !token || !actorUid) return false;
+
+  const norm = normalizeAdSettings(settings, settingId);
+  const safeUid = actorUid.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+  const fullDocName = `projects/${projectId}/databases/${databaseId || '(default)'}/documents/ad_settings/${settingId}`;
+
+  const docFields: Record<string, unknown> = {
+    enabled: norm.enabled,
+    version: Math.max(1, norm.version || 1),
+    status: settingId,
+    socialBarScript: norm.socialBarScript,
+    socialBarMobileScript: norm.socialBarMobileScript,
+    popunderScript: norm.popunderScript,
+    popunderMobileScript: norm.popunderMobileScript,
+    smartlinkUrl: norm.smartlinkUrl,
+    banner320x50Code: norm.banner320x50Code,
+    banner320x50DesktopCode: norm.banner320x50DesktopCode,
+    banner160x300Code: norm.banner160x300Code,
+    nativeAdCode: norm.nativeAdCode,
+    nativeAdMobileCode: norm.nativeAdMobileCode,
+    enabledTypes: norm.enabledTypes,
+    pages: norm.pages,
+    slots: norm.slots,
+    devices: norm.devices,
+    ...(norm.publishedAt ? { publishedAt: norm.publishedAt } : {}),
+    updatedBy: safeUid,
+  };
+
+  try {
+    const res = await fetch(`${baseUrl}:commit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        writes: [
+          {
+            update: {
+              name: fullDocName,
+              fields: toFirestoreDocument(docFields).fields,
+            },
+            updateTransforms: [
+              {
+                fieldPath: 'updatedAt',
+                setToServerValue: 'REQUEST_TIME',
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function fetchPublishedAdSettingsFromFirestoreRest(): Promise<AdSettings | null> {
+  const baseUrl = getDocBaseUrl();
+  if (!baseUrl) return null;
+
+  let apiKey = (process.env.FIREBASE_API_KEY || '').trim();
+  if (!apiKey) {
+    try {
+      const cfgPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+      if (fs.existsSync(cfgPath)) {
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as { apiKey?: string };
+        apiKey = (cfg.apiKey || '').trim();
+      }
+    } catch {
+      // Optional key
+    }
+  }
+
+  try {
+    const url = apiKey
+      ? `${baseUrl}/ad_settings/published?key=${encodeURIComponent(apiKey)}`
+      : `${baseUrl}/ad_settings/published`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const doc = (await res.json()) as { fields?: Record<string, FirestoreValue> };
+    if (!doc?.fields) return null;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(doc.fields)) {
+      out[k] = decodeValue(v);
+    }
+    return normalizeAdSettings(out, 'published');
+  } catch {
+    return null;
+  }
 }

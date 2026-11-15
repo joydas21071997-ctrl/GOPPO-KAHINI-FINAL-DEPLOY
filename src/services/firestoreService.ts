@@ -415,12 +415,14 @@ function buildAdFirestorePayload(
 }
 
 export async function saveAdDraftToFirestore(settings: AdSettings): Promise<AdSettings> {
-  const uid = auth?.currentUser?.uid;
+  const fbUser = auth?.currentUser;
+  const uid = fbUser?.uid;
   const nowIso = new Date().toISOString();
   const nextDraft = normalizeAdSettings({ ...settings, status: 'draft', updatedAt: nowIso }, 'draft');
-  if (!isFirebaseConfigured || !db || !uid) {
-    return nextDraft;
+  if (!isFirebaseConfigured || !db || !fbUser || !uid) {
+    throw new Error('Firebase অ্যাডমিন সেশন পাওয়া যায়নি। অনুগ্রহ করে পুনরায় Google দিয়ে লগইন করুন।');
   }
+  await ensureBootstrappedAdminDoc(fbUser).catch(() => {});
   const path = 'ad_settings/draft';
   try {
     await setDoc(
@@ -434,7 +436,13 @@ export async function saveAdDraftToFirestore(settings: AdSettings): Promise<AdSe
 }
 
 export async function publishAdSettingsToFirestore(settings: AdSettings): Promise<AdSettings> {
-  const uid = auth?.currentUser?.uid;
+  const fbUser = auth?.currentUser;
+  const uid = fbUser?.uid;
+  if (!isFirebaseConfigured || !db || !fbUser || !uid) {
+    throw new Error('Firebase অ্যাডমিন সেশন পাওয়া যায়নি। লাইভ সাইট ও PWA-তে প্রকাশ করতে অনুগ্রহ করে Google দিয়ে লগইন করুন।');
+  }
+  await ensureBootstrappedAdminDoc(fbUser).catch(() => {});
+
   const nowIso = new Date().toISOString();
   const nextVersion = Math.max(1, (settings.version || 0) + 1);
   const nextPublished = normalizeAdSettings(
@@ -444,13 +452,10 @@ export async function publishAdSettingsToFirestore(settings: AdSettings): Promis
       version: nextVersion,
       publishedAt: nowIso,
       updatedAt: nowIso,
-      updatedBy: uid || settings.updatedBy,
+      updatedBy: uid,
     },
     'published',
   );
-  if (!isFirebaseConfigured || !db || !uid) {
-    return nextPublished;
-  }
 
   try {
     // 1. Update Published document (live source for website & PWA)
