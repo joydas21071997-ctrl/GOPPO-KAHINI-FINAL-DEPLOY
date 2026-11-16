@@ -151,6 +151,7 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
   const completeFirebaseUserSession = async (
     fbUser: User,
     forceTokenRefresh = false,
+    customNameOverride?: string,
   ): Promise<boolean> => {
     await ensureBootstrappedAdminDoc(fbUser).catch(() => {});
     await syncUserAccountToFirestore(fbUser, language).catch(() => {});
@@ -169,7 +170,10 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${idToken}`,
         },
-        body: JSON.stringify({ language }),
+        body: JSON.stringify({
+          language,
+          name: (customNameOverride || fbUser.displayName || '').trim() || undefined,
+        }),
       });
       const contentType = res.headers.get('content-type') || '';
       if (contentType.includes('application/json')) {
@@ -354,7 +358,7 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
           if (marketingConsent) {
             setMarketingConsentCapturedInSession(true);
           }
-          const ok = await completeFirebaseUserSession(cred.user, true);
+          const ok = await completeFirebaseUserSession(cred.user, true, trimmedName);
           if (ok) {
             if (verificationSent) {
               setAuthNotice(t.library.verificationEmailSent);

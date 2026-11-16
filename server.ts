@@ -432,6 +432,7 @@ async function resolveFirebaseUserProfile(
   token: string,
   verified: VerifiedFirebaseToken,
   preferredLangOverride?: Language,
+  clientNameOverride?: string,
 ): Promise<UserProfile> {
   const existing = findExistingUserForFirebase(verified);
 
@@ -478,11 +479,18 @@ async function resolveFirebaseUserProfile(
     }
   }
 
+  const effectiveName =
+    clientNameOverride ||
+    verified.name ||
+    (verified.email ? verified.email.split('@')[0] : 'Goppo Kahini User');
+
   if (existing) {
     existing.firebaseUid = verified.uid;
     existing.role = resolvedRole;
     existing.permissions = resolvedPermissions;
-    if (verified.name && (!existing.name || existing.name === existing.email.split('@')[0])) {
+    if (clientNameOverride) {
+      existing.name = clientNameOverride;
+    } else if (verified.name && (!existing.name || existing.name === existing.email.split('@')[0])) {
       existing.name = verified.name;
     }
     if (preferredLangOverride) {
@@ -497,7 +505,7 @@ async function resolveFirebaseUserProfile(
   const created: UserProfile = {
     id: newId,
     firebaseUid: verified.uid,
-    name: verified.name || (verified.email ? verified.email.split('@')[0] : 'Goppo Kahini User'),
+    name: effectiveName,
     email: verified.email,
     role: resolvedRole,
     permissions: resolvedPermissions,
@@ -982,7 +990,16 @@ function isUploadFilePubliclyAccessible(fileName: string): {
 
     const preferredLanguage: Language | undefined =
       req.body?.language === 'hi' ? 'hi' : req.body?.language === 'bn' ? 'bn' : undefined;
-    const user = await resolveFirebaseUserProfile(idToken, verified, preferredLanguage);
+    const clientNameOverride =
+      typeof req.body?.name === 'string' && req.body.name.trim().length > 0
+        ? req.body.name.trim().slice(0, 120)
+        : undefined;
+    const user = await resolveFirebaseUserProfile(
+      idToken,
+      verified,
+      preferredLanguage,
+      clientNameOverride,
+    );
 
     res.json({
       user,

@@ -361,6 +361,161 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     return false;
   };
 
+  // Synchronize registered customers and orders directly from Firestore
+  const syncCustomersAndOrdersFromFirestore = async (): Promise<{
+    userCount: number;
+    orderCount: number;
+  } | null> => {
+    if (!db || !isOwnerAdmin) return null;
+    try {
+      const usersSnap = await getDocs(collection(db, 'users'));
+      const firestoreUsers: UserProfile[] = [];
+
+      for (const userDoc of usersSnap.docs) {
+        const uData = userDoc.data();
+        const uid = userDoc.id;
+
+        // Try reading private info doc for verified email
+        let email = '';
+        try {
+          const privateSnap = await getDoc(doc(db, 'users', uid, 'private', 'info'));
+          if (privateSnap.exists()) {
+            email = (privateSnap.data().email as string) || '';
+          }
+        } catch {
+          // Rule or network fallback
+        }
+
+        // Try reading entitlements for purchased story IDs
+        const purchasedStoryIds: string[] = [];
+        try {
+          const entSnap = await getDocs(collection(db, 'users', uid, 'entitlements'));
+          entSnap.forEach((ed) => {
+            if (ed.id) purchasedStoryIds.push(ed.id);
+          });
+        } catch {
+          // Rule or network fallback
+        }
+
+        const role =
+          uData.role === 'admin'
+            ? 'admin'
+            : uData.role === 'editor'
+            ? 'editor'
+            : 'listener';
+
+        firestoreUsers.push({
+          id: uid,
+          firebaseUid: uid,
+          name: (uData.name as string) || (email ? email.split('@')[0] : 'Goppo Kahini Listener'),
+          email: email || `${uData.name || 'user'}@firebase`,
+          role,
+          preferredLanguage: (uData.preferredLanguage === 'hi' ? 'hi' : 'bn') as Language,
+          purchasedStoryIds,
+          storyEntitlements: {},
+          membership: {
+            planId: 'npass_monthly_9',
+            priceInr: 9,
+            status: 'INACTIVE',
+          },
+        });
+      }
+
+      // Query orders from Firestore
+      const firestoreOrders: OrderRecord[] = [];
+      try {
+        const ordersSnap = await getDocs(collection(db, 'orders'));
+        ordersSnap.forEach((oDoc) => {
+          const oData = oDoc.data();
+          firestoreOrders.push({
+            orderId: oDoc.id,
+            userId: (oData.userId as string) || '',
+            itemType: (oData.itemType as any) || 'story_ticket',
+            storyId: oData.storyId as string | undefined,
+            itemTitle: (oData.itemTitle as string) || 'অডিও কাহিনী টিকিট',
+            language: (oData.language as Language) || 'bn',
+            amountInr: Number(oData.amountInr) || 9,
+            paymentMethod: (oData.paymentMethod as any) || 'upi',
+            status: (oData.status as any) || 'VERIFIED',
+            createdAt:
+              oData.createdAt && typeof (oData.createdAt as any).toDate === 'function'
+                ? (oData.createdAt as any).toDate().toISOString()
+                : String(oData.createdAt || new Date().toISOString()),
+          });
+        });
+      } catch {
+        // Orders collection empty or fallback
+      }
+
+      // Merge Firestore users with current allUsers state
+      if (firestoreUsers.length > 0) {
+        setAllUsers((prevUsers) => {
+          const map = new Map<string, UserProfile>();
+          for (const u of prevUsers) {
+            map.set(u.firebaseUid || u.id, u);
+          }
+          for (const fu of firestoreUsers) {
+            const key = fu.firebaseUid || fu.id;
+            const existing = map.get(key);
+            if (existing) {
+              map.set(key, {
+                ...existing,
+                name: fu.name || existing.name,
+                email: fu.email || existing.email,
+                purchasedStoryIds: Array.from(
+                  new Set([...existing.purchasedStoryIds, ...fu.purchasedStoryIds]),
+                ),
+              });
+            } else {
+              map.set(key, fu);
+            }
+          }
+          return Array.from(map.values());
+        });
+      }
+
+      // Merge orders
+      if (firestoreOrders.length > 0) {
+        setAllOrders((prevOrders) => {
+          const orderMap = new Map<string, OrderRecord>();
+          for (const o of prevOrders) {
+            orderMap.set(o.orderId, o);
+          }
+          for (const fo of firestoreOrders) {
+            orderMap.set(fo.orderId, fo);
+          }
+          return Array.from(orderMap.values());
+        });
+      }
+
+      return {
+        userCount: firestoreUsers.length,
+        orderCount: firestoreOrders.length,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const handleManualSyncCustomers = async () => {
+    setBusy(true);
+    setStatusBanner('ফায়ারবেস ডেটাবেস থেকে কাস্টমার ও অর্ডার সিঙ্ক হচ্ছে...');
+    try {
+      const res = await syncCustomersAndOrdersFromFirestore();
+      if (res && res.userCount > 0) {
+        setStatusBanner(
+          `সফল! ফায়ারবেস থেকে ${res.userCount} জন কাস্টমার ও ${res.orderCount}টি অর্ডার সিঙ্ক সম্পন্ন হয়েছে।`,
+        );
+      } else {
+        setStatusBanner('ফায়ারবেস ডেটাবেস সিঙ্ক সম্পন্ন হয়েছে।');
+      }
+    } catch (err) {
+      setStatusBanner(err instanceof Error ? `সিঙ্ক ব্যর্থ: ${err.message}` : 'সিঙ্ক ব্যর্থ হয়েছে।');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Load catalog overview & synchronize latest Ad Settings (merging Express + Firestore)
   const fetchOverview = async (token = authToken) => {
     let apiPublished: AdSettings | null = null;
@@ -411,6 +566,10 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
           if (settingsSnap.exists() && settingsSnap.data().nPassMonthlyPriceInr) {
             setCustomNPassPrice(settingsSnap.data().nPassMonthlyPriceInr);
           }
+        }
+
+        if (isOwnerAdmin) {
+          await syncCustomersAndOrdersFromFirestore();
         }
 
         const [draftFromFs, pubFromFs] = await Promise.all([
@@ -3826,6 +3985,16 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
 
               <button
                 type="button"
+                disabled={busy}
+                onClick={handleManualSyncCustomers}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.11] border border-white/[0.12] text-xs font-semibold text-[#F5F2EB] cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 text-cyan-400 ${busy ? 'animate-spin' : ''}`} />
+                <span>কাস্টমার ও অর্ডার সিঙ্ক করুন ({allUsers.length})</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={handleExportJson}
                 className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-xs font-semibold text-[#F5F2EB] cursor-pointer"
               >
@@ -4242,14 +4411,26 @@ service firebase.storage {
                     </p>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={handleExportCustomersCsv}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.1] text-xs font-semibold text-[#F5F2EB] cursor-pointer shrink-0 self-start sm:self-auto"
-                  >
-                    <Download className="h-3.5 w-3.5 text-[#EF4444]" />
-                    <span>CSV এক্সপোর্ট</span>
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2 shrink-0 self-start sm:self-auto">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={handleManualSyncCustomers}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.1] text-xs font-semibold text-[#F5F2EB] cursor-pointer disabled:opacity-50"
+                      title="ফায়ারবেস ডেটাবেস থেকে সব কাস্টমার ও অর্ডার সিঙ্ক করুন"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 text-emerald-400 ${busy ? 'animate-spin' : ''}`} />
+                      <span>ফায়ারবেস থেকে সিঙ্ক</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleExportCustomersCsv}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.1] text-xs font-semibold text-[#F5F2EB] cursor-pointer"
+                    >
+                      <Download className="h-3.5 w-3.5 text-[#EF4444]" />
+                      <span>CSV এক্সপোর্ট</span>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="relative">
