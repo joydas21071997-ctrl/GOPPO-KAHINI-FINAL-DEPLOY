@@ -127,6 +127,7 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
   const [emailInput, setEmailInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [agreeTerms, setAgreeTerms] = useState(false);
   const [marketingConsent, setMarketingConsent] = useState(false);
   const [marketingConsentCapturedInSession, setMarketingConsentCapturedInSession] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -313,6 +314,15 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
         language === 'bn'
           ? 'অনুগ্রহ করে একটি সঠিক ইমেইল ঠিকানা লিখুন।'
           : 'कृपया एक वैध ईमेल पता दर्ज करें।',
+      );
+      return;
+    }
+
+    if (isRegisterMode && !agreeTerms) {
+      setAuthError(
+        language === 'bn'
+          ? 'রেজিস্ট্রেশন সম্পন্ন করতে ব্যবহারের শর্তাবলীতে (Terms & Conditions) সম্মতি দিন।'
+          : 'रजिस्ट्रेशन पूरा करने के लिए कृपया उपयोग की शर्तों (Terms & Conditions) से सहमत हों।',
       );
       return;
     }
@@ -998,9 +1008,24 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
                     </div>
                   )}
 
-                  {/* Optional Email Updates & Marketing Consent (Unchecked by default, non-blocking) */}
+                   {/* Registration Terms & Conditions & Marketing Consent */}
                   {isRegisterMode && (
-                    <div className="rounded-xl bg-white/[0.02] border border-white/[0.07] p-3.5 space-y-1.5">
+                    <div className="rounded-xl bg-white/[0.02] border border-white/[0.07] p-3.5 space-y-3">
+                      <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          required
+                          checked={agreeTerms}
+                          onChange={(e) => setAgreeTerms(e.target.checked)}
+                          className="mt-0.5 h-4 w-4 rounded border-white/20 bg-[#0B090E] text-[#EF4444] accent-[#EF4444] cursor-pointer shrink-0"
+                        />
+                        <span className="text-xs text-[#F5F2EB]/90 leading-relaxed">
+                          {language === 'bn'
+                            ? 'আমি Goppo Kahini-এর ব্যবহারের শর্তাবলী (Terms & Conditions) এবং প্রাইভেসি পলিসিতে সম্মত আছি।'
+                            : 'मैं Goppo Kahini की उपयोग की शर्तों (Terms & Conditions) और गोपनीयता नीति से सहमत हूँ।'}
+                        </span>
+                      </label>
+
                       <label className="flex items-start gap-2.5 cursor-pointer select-none">
                         <input
                           type="checkbox"
