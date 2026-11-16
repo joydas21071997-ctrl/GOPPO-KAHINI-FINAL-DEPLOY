@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { resolveArtworkUrl } from '../utils/artworkRegistry';
 
 interface ArtworkImageProps {
@@ -16,6 +16,10 @@ export const ArtworkImage: React.FC<ArtworkImageProps> = ({
 }) => {
   const [failed, setFailed] = useState(false);
   const resolved = resolveArtworkUrl(srcKeyOrUrl);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [srcKeyOrUrl]);
 
   if (!resolved || failed) {
     return (
