@@ -362,7 +362,9 @@ async function resolveFirebaseUserProfile(
   let resolvedPermissions: AdminPermission[] | undefined = undefined;
 
   const isOwnerByEnv = isEnvProvisionedOwner(verified);
-  const firestoreAdminDoc = await checkFirestoreRoleDoc(token, 'admins', verified.uid);
+  const firestoreAdminDoc = verified.emailVerified
+    ? await checkFirestoreRoleDoc(token, 'admins', verified.uid)
+    : null;
   const isOwnerByExistingRecord =
     verified.emailVerified && existing?.role === 'admin';
 
@@ -659,6 +661,10 @@ function isUploadFilePubliclyAccessible(fileName: string): {
   }
 
   const app = express();
+  app.use((_req: Request, res: Response, next) => {
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    next();
+  });
   app.use(
     express.json({
       limit: '50mb',

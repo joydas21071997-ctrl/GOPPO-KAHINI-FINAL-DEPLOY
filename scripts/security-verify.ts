@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { createGoppoApp, type GoppoAppOptions } from '../server.ts';
-import type { VerifiedFirebaseToken } from '../server/firebaseAuth.ts';
+import { verifyFirebaseIdToken, type VerifiedFirebaseToken } from '../server/firebaseAuth.ts';
 
 process.env.GOPPO_NO_AUTOSTART = 'true';
 process.env.OWNER_ADMIN_EMAILS =
@@ -42,6 +42,21 @@ const MOCK_TOKENS: Record<string, VerifiedFirebaseToken> = {
     email: 'bob@example.com',
     emailVerified: true,
     name: 'Bob Listener',
+    signInProvider: 'google.com',
+  },
+  'tok.emailverified.jwt': {
+    uid: 'uid_email_ver_003',
+    email: 'charlie@example.com',
+    emailVerified: true,
+    name: 'Charlie Reader',
+    signInProvider: 'password',
+  },
+  'tok.emailunverified.jwt': {
+    uid: 'uid_attacker_unverified',
+    email: 'joydas.21071997@gmail.com',
+    emailVerified: false,
+    name: 'Fake Owner',
+    signInProvider: 'password',
   },
 };
 
@@ -801,6 +816,139 @@ async function runTests() {
       const streamedChunk = Buffer.from(await signedRangeRes.arrayBuffer());
       assert.deepEqual(streamedChunk, mp4Buf.subarray(0, 16));
       record('11. Entitled user receives short-lived signed URL and streams protected MP4 (206 Range)');
+    },
+  );
+
+  // =========================================================================
+  // SUITE 12: Firebase JWT Claim & Format Verification Hardening
+  // =========================================================================
+  {
+    const makeUnsignedJwt = (header: object, payload: object) => {
+      const h = Buffer.from(JSON.stringify(header)).toString('base64url');
+      const p = Buffer.from(JSON.stringify(payload)).toString('base64url');
+      return `${h}.${p}.invalidsig`;
+    };
+    const now = Math.floor(Date.now() / 1000);
+    assert.equal(await verifyFirebaseIdToken(''), null);
+    assert.equal(await verifyFirebaseIdToken('not-a-jwt'), null);
+    assert.equal(
+      await verifyFirebaseIdToken(
+        makeUnsignedJwt(
+          { alg: 'none', kid: 'kid1' },
+          { aud: 'goppo-kahini', iss: 'https://securetoken.google.com/goppo-kahini', sub: 'u1', exp: now + 3600, iat: now },
+        ),
+      ),
+      null,
+    );
+    assert.equal(
+      await verifyFirebaseIdToken(
+        makeUnsignedJwt(
+          { alg: 'RS256', kid: 'kid1' },
+          { aud: 'wrong-project', iss: 'https://securetoken.google.com/goppo-kahini', sub: 'u1', exp: now + 3600, iat: now },
+        ),
+      ),
+      null,
+    );
+    assert.equal(
+      await verifyFirebaseIdToken(
+        makeUnsignedJwt(
+          { alg: 'RS256', kid: 'kid1' },
+          { aud: 'goppo-kahini', iss: 'https://securetoken.google.com/wrong', sub: 'u1', exp: now + 3600, iat: now },
+        ),
+      ),
+      null,
+    );
+    assert.equal(
+      await verifyFirebaseIdToken(
+        makeUnsignedJwt(
+          { alg: 'RS256', kid: 'kid1' },
+          { aud: 'goppo-kahini', iss: 'https://securetoken.google.com/goppo-kahini', sub: 'u1', exp: now - 60, iat: now - 3600 },
+        ),
+      ),
+      null,
+    );
+    record('12. verifyFirebaseIdToken rejects malformed, alg=none, wrong-aud, wrong-iss, and expired JWTs');
+  }
+
+  // =========================================================================
+  // SUITE 13: Auth Lifecycle (Google + Email/Password, Session Persistence, Logout)
+  // =========================================================================
+  await withServer(
+    {
+      isProductionOverride: true,
+      allowSandboxOverride: false,
+      paymentGatewayOverride: { enabled: false },
+    },
+    async (baseUrl) => {
+      // Missing / invalid token rejected with 401
+      const noTokenRes = await fetch(`${baseUrl}/api/auth/firebase`, { method: 'POST' });
+      assert.equal(noTokenRes.status, 401);
+
+      const badTokenRes = await fetch(`${baseUrl}/api/auth/firebase`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer invalid.jwt.token' },
+      });
+      assert.equal(badTokenRes.status, 401);
+
+      // Unverified email claiming owner email MUST NOT elevate to admin
+      const spoofUnverified = await fetch(`${baseUrl}/api/auth/firebase`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tok.emailunverified.jwt' },
+      });
+      assert.equal(spoofUnverified.status, 200);
+      const spoofBody = await spoofUnverified.json();
+      assert.equal(spoofBody.user.role, 'listener');
+
+      // Verified Email/Password sign-in works cleanly & persists across /api/bootstrap
+      const emailSignIn = await fetch(`${baseUrl}/api/auth/firebase`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer tok.emailverified.jwt',
+        },
+        body: JSON.stringify({ language: 'hi' }),
+      });
+      assert.equal(emailSignIn.status, 200);
+      const emailBody = await emailSignIn.json();
+      assert.equal(emailBody.user.email, 'charlie@example.com');
+      assert.equal(emailBody.user.role, 'listener');
+      assert.equal(emailBody.user.preferredLanguage, 'hi');
+
+      const bootWithEmailToken = await fetch(`${baseUrl}/api/bootstrap`, {
+        headers: { Authorization: 'Bearer tok.emailverified.jwt' },
+      });
+      assert.equal(bootWithEmailToken.status, 200);
+      const bootData = await bootWithEmailToken.json();
+      assert.equal(bootData.user.email, 'charlie@example.com');
+      assert.equal(bootData.user.firebaseUid, 'uid_email_ver_003');
+
+      // Non-Firebase listener login & logout invalidation
+      const listenerLogin = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'localuser@example.com', name: 'Local User', language: 'bn' }),
+      });
+      assert.equal(listenerLogin.status, 200);
+      const listenerPayload = await listenerLogin.json();
+      assert.ok(listenerPayload.token);
+
+      const bootLocalBeforeLogout = await fetch(`${baseUrl}/api/bootstrap`, {
+        headers: { Authorization: `Bearer ${listenerPayload.token}` },
+      });
+      assert.equal((await bootLocalBeforeLogout.json()).user.email, 'localuser@example.com');
+
+      const logoutRes = await fetch(`${baseUrl}/api/auth/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${listenerPayload.token}` },
+      });
+      assert.equal(logoutRes.status, 200);
+
+      const bootLocalAfterLogout = await fetch(`${baseUrl}/api/bootstrap`, {
+        headers: { Authorization: `Bearer ${listenerPayload.token}` },
+      });
+      assert.equal((await bootLocalAfterLogout.json()).user, null);
+
+      record('13. Auth lifecycle (Google/Email providers, unverified role guard, session persistence, logout)');
     },
   );
 

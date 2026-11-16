@@ -211,6 +211,15 @@ export interface UIStrings {
     registerSubtitle: string;
     nameLabel: string;
     emailLabel: string;
+    passwordLabel: string;
+    passwordPlaceholder: string;
+    forgotPassword: string;
+    passwordResetSent: string;
+    enterEmailForReset: string;
+    verificationEmailSent: string;
+    emailNotVerifiedBanner: string;
+    resendVerificationEmail: string;
+    refreshVerificationStatus: string;
     passcodeLabel: string;
     adminLoginToggle: string;
     marketingConsentText: string;
@@ -457,6 +466,15 @@ export const TRANSLATIONS: Record<Language, UIStrings> = {
       registerSubtitle: 'কোনো মাসিক ফি বা পেমেন্ট ছাড়াই কয়েক সেকেন্ডে আপনার ফ্রি অ্যাকাউন্ট তৈরি করুন',
       nameLabel: 'আপনার নাম',
       emailLabel: 'ইমেইল ঠিকানা',
+      passwordLabel: 'পাসওয়ার্ড',
+      passwordPlaceholder: 'কমপক্ষে ৬ অক্ষরের পাসওয়ার্ড',
+      forgotPassword: 'পাসওয়ার্ড ভুলে গেছেন?',
+      passwordResetSent: 'পাসওয়ার্ড রিসেট করার লিংক আপনার ইমেইলে পাঠানো হয়েছে। ইনবক্স বা স্প্যাম ফোল্ডার দেখুন।',
+      enterEmailForReset: 'পাসওয়ার্ড রিসেট করতে উপরে আপনার ইমেইল ঠিকানা লিখুন।',
+      verificationEmailSent: 'একটি ভেরিফিকেশন ইমেইল পাঠানো হয়েছে। অনুগ্রহ করে ইনবক্স থেকে লিংকটি কনফার্ম করুন।',
+      emailNotVerifiedBanner: 'আপনার ইমেইল ঠিকানাটি এখনো যাচাইকৃত (Verified) নয়। পূর্ণ প্রোফাইল ও অগ্রগতি সিঙ্কের জন্য ইমেইলটি ভেরিফাই করুন।',
+      resendVerificationEmail: 'ভেরিফিকেশন ইমেইল পাঠান',
+      refreshVerificationStatus: 'ভেরিফাই হয়েছে? রিফ্রেশ করুন',
       passcodeLabel: 'অ্যাডমিন অ্যাক্সেস কোড',
       adminLoginToggle: 'অ্যাডমিন অ্যাক্সেস কোড আছে? (ঐচ্ছিক)',
       marketingConsentText: 'I agree to receive Goppo Kahini updates, new story announcements, special offers, and newsletters by email.',
@@ -701,6 +719,15 @@ export const TRANSLATIONS: Record<Language, UIStrings> = {
       registerSubtitle: 'बिना किसी शुल्क या भुगतान के कुछ सेकंड में अपना निःशुल्क अकाउंट बनाएँ',
       nameLabel: 'आपका नाम',
       emailLabel: 'ईमेल पता',
+      passwordLabel: 'पासवर्ड',
+      passwordPlaceholder: 'कम से कम 6 अक्षरों का पासवर्ड',
+      forgotPassword: 'पासवर्ड भूल गए?',
+      passwordResetSent: 'पासवर्ड रीसेट लिंक आपके ईमेल पर भेज दिया गया है। कृपया इनबॉक्स या स्पैम जांचें।',
+      enterEmailForReset: 'पासवर्ड रीसेट करने के लिए ऊपर अपना ईमेल पता दर्ज करें।',
+      verificationEmailSent: 'सत्यापन ईमेल भेज दिया गया है। कृपया अपने इनबॉक्स में दिए गए लिंक से पुष्टि करें।',
+      emailNotVerifiedBanner: 'आपका ईमेल अभी सत्यापित (Verified) नहीं है। प्रोफ़ाइल व प्रगति सिंक करने के लिए ईमेल सत्यापित करें।',
+      resendVerificationEmail: 'सत्यापन ईमेल भेजें',
+      refreshVerificationStatus: 'सत्यापित हो गया? रिफ़्रेश करें',
       passcodeLabel: 'एडमिन एक्सेस कोड',
       adminLoginToggle: 'एडमिन एक्सेस कोड है? (वैकल्पिक)',
       marketingConsentText: 'I agree to receive Goppo Kahini updates, new story announcements, special offers, and newsletters by email.',

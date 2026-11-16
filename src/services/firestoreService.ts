@@ -6,8 +6,10 @@ import {
   getDoc,
   getDocFromServer,
   getDocs,
+  query,
   serverTimestamp,
   setDoc,
+  where,
 } from 'firebase/firestore';
 import {
   auth,
@@ -20,12 +22,17 @@ import {
 import {
   DEFAULT_TICKET_PRICE_INR,
   MAX_LISTENS_PER_PURCHASE,
+  type AdminPermission,
   type AdSettings,
   type CategoryConfig,
   type ContentCategory,
   type EditorGrant,
   type Language,
+  type OrderRecord,
+  type PlaybackProgress,
   type StoryItem,
+  type StoryTicketEntitlement,
+  type UserProfile,
 } from '../types/content';
 import { normalizeAdSettings } from '../utils/adConfig';
 
@@ -73,7 +80,13 @@ export async function syncUserAccountToFirestore(
   fbUser: User,
   preferredLanguage: Language,
 ): Promise<void> {
-  if (!isFirebaseConfigured || !db || !fbUser.uid || !VALID_ID_REGEX.test(fbUser.uid)) {
+  if (
+    !isFirebaseConfigured ||
+    !db ||
+    !fbUser.uid ||
+    !VALID_ID_REGEX.test(fbUser.uid) ||
+    !fbUser.emailVerified
+  ) {
     return;
   }
 
@@ -123,6 +136,307 @@ export async function syncUserAccountToFirestore(
       handleFirestoreError(error, OperationType.WRITE, privatePath);
     }
   }
+}
+
+const ALL_CLIENT_ADMIN_PERMISSIONS: AdminPermission[] = [
+  'manage_stories',
+  'manage_media',
+  'manage_hero',
+  'translate_stories',
+  'manage_categories',
+  'manage_settings',
+  'manage_users_orders',
+  'manage_editors',
+  'export_import_catalog',
+];
+
+export async function hydrateClientUserFromFirestore(
+  fbUser: User,
+  preferredLangOverride?: Language,
+): Promise<{
+  user: UserProfile;
+  orders: OrderRecord[];
+  progress: PlaybackProgress[];
+}> {
+  const emailLower = (fbUser.email || '').trim().toLowerCase();
+  let role: UserProfile['role'] = 'listener';
+  let permissions: AdminPermission[] | undefined = undefined;
+  let storedName = fbUser.displayName || (emailLower ? emailLower.split('@')[0] : '') || 'Listener';
+  let preferredLanguage: Language = preferredLangOverride || 'bn';
+
+  if (db && VALID_ID_REGEX.test(fbUser.uid)) {
+    const isVerifiedBootstrappedOwner =
+      fbUser.emailVerified && emailLower === 'joydas.21071997@gmail.com';
+
+    let isAdmin = isVerifiedBootstrappedOwner;
+    if (!isAdmin && fbUser.emailVerified) {
+      try {
+        const adminSnap = await getDoc(doc(db, 'admins', fbUser.uid));
+        isAdmin = adminSnap.exists();
+      } catch {
+        // Not an admin
+      }
+    }
+
+    if (isAdmin) {
+      role = 'admin';
+      permissions = [...ALL_CLIENT_ADMIN_PERMISSIONS];
+    } else if (fbUser.emailVerified) {
+      try {
+        const editorSnap = await getDoc(doc(db, 'editors', fbUser.uid));
+        if (editorSnap.exists()) {
+          const rawPerms = editorSnap.data()?.permissions;
+          const validPerms = Array.isArray(rawPerms)
+            ? (rawPerms.filter((p): p is AdminPermission => typeof p === 'string' && EDITOR_PERMS.has(p)))
+            : [];
+          if (validPerms.length > 0) {
+            role = 'editor';
+            permissions = validPerms;
+          }
+        }
+      } catch {
+        // Not an editor
+      }
+    }
+
+    try {
+      const userSnap = await getDoc(doc(db, 'users', fbUser.uid));
+      if (userSnap.exists()) {
+        const data = userSnap.data();
+        if (typeof data.name === 'string' && data.name.trim()) {
+          storedName = data.name.trim();
+        }
+        if (!preferredLangOverride && (data.preferredLanguage === 'hi' || data.preferredLanguage === 'bn')) {
+          preferredLanguage = data.preferredLanguage;
+        }
+      }
+    } catch {
+      // Unverified email user or newly registered user without /users/{uid} doc yet
+    }
+  }
+
+  const storyEntitlements: Record<string, StoryTicketEntitlement> = {};
+  const purchasedStoryIds: string[] = [];
+  const orders: OrderRecord[] = [];
+  const progress: PlaybackProgress[] = [];
+
+  if (db && VALID_ID_REGEX.test(fbUser.uid)) {
+    try {
+      const entSnap = await getDocs(collection(db, 'users', fbUser.uid, 'entitlements'));
+      entSnap.forEach((docSnap) => {
+        const ent = docSnap.data() as Partial<StoryTicketEntitlement>;
+        const sid = ent.storyId || docSnap.id;
+        if (sid) {
+          storyEntitlements[sid] = {
+            storyId: sid,
+            remainingListens: Number(ent.remainingListens) || 0,
+            totalListensUsed: Number(ent.totalListensUsed) || 0,
+            completedEpisodeIdsInCycle: Array.isArray(ent.completedEpisodeIdsInCycle)
+              ? ent.completedEpisodeIdsInCycle
+              : [],
+            lastOrderId: ent.lastOrderId,
+            updatedAt: typeof ent.updatedAt === 'string' ? ent.updatedAt : new Date().toISOString(),
+          };
+          if ((Number(ent.remainingListens) || 0) > 0 && !purchasedStoryIds.includes(sid)) {
+            purchasedStoryIds.push(sid);
+          }
+        }
+      });
+    } catch {
+      // Non-blocking fallback
+    }
+
+    try {
+      const progSnap = await getDocs(collection(db, 'users', fbUser.uid, 'progress'));
+      progSnap.forEach((docSnap) => {
+        const p = docSnap.data() as Partial<PlaybackProgress>;
+        if (p.storyId && p.episodeId) {
+          progress.push({
+            storyId: p.storyId,
+            episodeId: p.episodeId,
+            isTrailer: Boolean(p.isTrailer),
+            positionSeconds: Number(p.positionSeconds) || 0,
+            durationSeconds: Number(p.durationSeconds) || 1,
+            updatedAt: typeof p.updatedAt === 'string' ? p.updatedAt : new Date().toISOString(),
+          });
+        }
+      });
+    } catch {
+      // Non-blocking fallback
+    }
+
+    try {
+      const ordersSnap = await getDocs(
+        query(collection(db, 'orders'), where('userId', '==', fbUser.uid)),
+      );
+      ordersSnap.forEach((docSnap) => {
+        const ord = docSnap.data() as OrderRecord;
+        if (ord && ord.orderId) {
+          orders.push(ord);
+        }
+      });
+      orders.sort((a, b) => Date.parse(b.createdAt || '0') - Date.parse(a.createdAt || '0'));
+    } catch {
+      // Non-blocking fallback
+    }
+  }
+
+  return {
+    user: {
+      id: fbUser.uid,
+      firebaseUid: fbUser.uid,
+      name: storedName,
+      email: fbUser.email || '',
+      role,
+      permissions,
+      preferredLanguage,
+      purchasedStoryIds,
+      storyEntitlements,
+      membership: {
+        planId: 'npass_monthly_9',
+        priceInr: DEFAULT_TICKET_PRICE_INR,
+        status: 'INACTIVE',
+      },
+    },
+    orders,
+    progress,
+  };
+}
+
+export function isEmbeddedIframe(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
+
+export function formatFirebaseAuthError(
+  error: unknown,
+  language: Language = 'bn',
+): { code: string; message: string; isCancelled?: boolean } {
+  const errObj = error as { code?: string; message?: string } | null;
+  const rawCode = typeof errObj?.code === 'string' ? errObj.code : '';
+  const rawMessage = error instanceof Error ? error.message : String(error || '');
+  const combined = `${rawCode} ${rawMessage}`.toLowerCase();
+
+  if (
+    combined.includes('popup-closed-by-user') ||
+    combined.includes('cancelled-popup-request')
+  ) {
+    return { code: rawCode || 'auth/popup-closed-by-user', message: '', isCancelled: true };
+  }
+  if (combined.includes('popup-blocked')) {
+    return {
+      code: 'auth/popup-blocked',
+      message:
+        language === 'bn'
+          ? 'ব্রাউজার সাইন-ইন পপ-আপ ব্লক করেছে। অনুগ্রহ করে এই সাইটের জন্য পপ-আপ অনুমতি দিন অথবা নতুন ট্যাবে খুলে চেষ্টা করুন।'
+          : 'ब्राउज़र ने साइन-इन पॉप-अप ब्लॉक किया है। कृपया पॉप-अप की अनुमति दें या नए टैब में खोलकर प्रयास करें।',
+    };
+  }
+  if (combined.includes('unauthorized-domain')) {
+    return {
+      code: 'auth/unauthorized-domain',
+      message:
+        language === 'bn'
+          ? 'এই ডোমেইনটি Firebase Authentication-এ Authorized Domain হিসেবে যুক্ত নয়। Firebase Console > Authentication > Settings > Authorized domains থেকে বর্তমান ডোমেইন যুক্ত করুন।'
+          : 'यह डोमेन Firebase Authentication में Authorized Domain के रूप में जुड़ा नहीं है। कृपया Firebase Console से डोमेन जोड़ें।',
+    };
+  }
+  if (combined.includes('operation-not-allowed')) {
+    return {
+      code: 'auth/operation-not-allowed',
+      message:
+        language === 'bn'
+          ? 'Firebase Console-এ এই সাইন-ইন পদ্ধতি (Google বা Email/Password) এখনো চালু করা হয়নি। অনুগ্রহ করে Firebase Console > Authentication > Sign-in method থেকে প্রোভাইডার Enable করুন।'
+          : 'Firebase Console में यह साइन-इन विधि (Google या Email/Password) सक्षम नहीं है। कृपया Firebase Console में Sign-in method चालू करें।',
+    };
+  }
+  if (combined.includes('email-already-in-use')) {
+    return {
+      code: 'auth/email-already-in-use',
+      message:
+        language === 'bn'
+          ? 'এই ইমেইল দিয়ে আগেই অ্যাকাউন্ট তৈরি করা আছে। অনুগ্রহ করে "লগইন" ট্যাব থেকে সাইন ইন করুন বা Google সাইন-ইন ব্যবহার করুন।'
+          : 'इस ईमेल से पहले ही अकाउंट बना हुआ है। कृपया "लॉगिन" टैब से साइन इन करें या Google साइन-इन उपयोग करें।',
+    };
+  }
+  if (
+    combined.includes('invalid-credential') ||
+    combined.includes('wrong-password') ||
+    combined.includes('user-not-found')
+  ) {
+    return {
+      code: rawCode || 'auth/invalid-credential',
+      message:
+        language === 'bn'
+          ? 'ইমেইল অথবা পাসওয়ার্ড সঠিক নয়। আগে Google দিয়ে সাইন ইন করে থাকলে Google বাটন ব্যবহার করুন অথবা পাসওয়ার্ড রিসেট করুন।'
+          : 'ईमेल या पासवर्ड गलत है। यदि आपने पहले Google से साइन इन किया था, तो Google बटन का उपयोग करें या पासवर्ड रीसेट करें।',
+    };
+  }
+  if (combined.includes('account-exists-with-different-credential')) {
+    return {
+      code: 'auth/account-exists-with-different-credential',
+      message:
+        language === 'bn'
+          ? 'এই ইমেইলটি অন্য সাইন-ইন পদ্ধতির সাথে যুক্ত। আপনার মূল সাইন-ইন পদ্ধতি (Google বা ইমেইল/পাসওয়ার্ড) দিয়ে প্রবেশ করুন।'
+          : 'यह ईमेल किसी अन्य साइन-इन विधि से जुड़ा है। कृपया अपनी मूल विधि से लॉगिन करें।',
+    };
+  }
+  if (combined.includes('weak-password')) {
+    return {
+      code: 'auth/weak-password',
+      message:
+        language === 'bn'
+          ? 'পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।'
+          : 'पासवर्ड कम से कम 6 अक्षरों का होना चाहिए।',
+    };
+  }
+  if (combined.includes('invalid-email')) {
+    return {
+      code: 'auth/invalid-email',
+      message:
+        language === 'bn'
+          ? 'অনুগ্রহ করে একটি সঠিক ইমেইল ঠিকানা লিখুন।'
+          : 'कृपया एक वैध ईमेल पता दर्ज करें।',
+    };
+  }
+  if (combined.includes('too-many-requests')) {
+    return {
+      code: 'auth/too-many-requests',
+      message:
+        language === 'bn'
+          ? 'অনেকবার চেষ্টা করার কারণে সাময়িকভাবে ব্লক করা হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।'
+          : 'बहुत अधिक प्रयासों के कारण अस्थायी रूप से रोका गया है। कृपया कुछ देर बाद पुनः प्रयास करें।',
+    };
+  }
+  if (combined.includes('user-disabled')) {
+    return {
+      code: 'auth/user-disabled',
+      message:
+        language === 'bn'
+          ? 'এই অ্যাকাউন্টটি নিষ্ক্রিয় করা হয়েছে। সহায়তার জন্য যোগাযোগ করুন।'
+          : 'यह अकाउंट अक्षम कर दिया गया है। कृपया सहायता के लिए संपर्क करें।',
+    };
+  }
+  if (combined.includes('network-request-failed')) {
+    return {
+      code: 'auth/network-request-failed',
+      message:
+        language === 'bn'
+          ? 'ইন্টারনেট সংযোগ অথবা Firebase অথেন্টিকেশন সার্ভারে পৌঁছানো যাচ্ছে না। নেটওয়ার্ক যাচাই করে আবার চেষ্টা করুন।'
+          : 'इंटरनेट कनेक्शन या Firebase सर्वर से संपर्क नहीं हो पा रहा है। कृपया नेटवर्क जांचकर पुनः प्रयास करें।',
+    };
+  }
+  return {
+    code: rawCode || 'auth/unknown',
+    message:
+      language === 'bn'
+        ? 'সাইন-ইন সম্পন্ন করা যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।'
+        : 'साइन-इन पूर्ण नहीं हो सका। कृपया पुनः प्रयास करें।',
+  };
 }
 
 export async function syncPlaybackProgressToFirestore(

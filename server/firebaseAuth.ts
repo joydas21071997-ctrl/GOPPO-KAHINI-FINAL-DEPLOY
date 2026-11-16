@@ -61,9 +61,9 @@ const GOOGLE_CERTS_URL =
 
 let cachedCerts: { keys: Record<string, string>; expiresAt: number } | null = null;
 
-async function fetchGooglePublicCerts(): Promise<Record<string, string>> {
+async function fetchGooglePublicCerts(forceRefresh = false): Promise<Record<string, string>> {
   const now = Date.now();
-  if (cachedCerts && cachedCerts.expiresAt > now) {
+  if (!forceRefresh && cachedCerts && cachedCerts.expiresAt > now) {
     return cachedCerts.keys;
   }
 
@@ -129,8 +129,12 @@ export async function verifyFirebaseIdToken(
     if (typeof payload.iat !== 'number' || payload.iat > nowSec + 300) return null;
     if (typeof payload.auth_time === 'number' && payload.auth_time > nowSec + 300) return null;
 
-    const certs = await fetchGooglePublicCerts();
-    const certPem = certs[header.kid];
+    let certs = await fetchGooglePublicCerts(false);
+    let certPem = certs[header.kid];
+    if (!certPem) {
+      certs = await fetchGooglePublicCerts(true);
+      certPem = certs[header.kid];
+    }
     if (!certPem) return null;
 
     const verifier = crypto.createVerify('RSA-SHA256');

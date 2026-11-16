@@ -38,8 +38,10 @@ import {
   Eye,
 } from 'lucide-react';
 import {
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
 } from 'firebase/auth';
 import {
@@ -59,6 +61,9 @@ import {
   fetchDraftAdsFromFirestore,
   fetchFirestoreDiagnostics,
   fetchPublishedAdsFromFirestore,
+  formatFirebaseAuthError,
+  hydrateClientUserFromFirestore,
+  isEmbeddedIframe,
   publishAdSettingsToFirestore,
   saveAdDraftToFirestore,
   syncCategoryToFirestore,
@@ -215,6 +220,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
 
   // Editor RBAC Management State (Owner/Admin only)
   const [editorEmailInput, setEditorEmailInput] = useState('');
@@ -599,8 +605,13 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
         },
         body: JSON.stringify({}),
       });
-      if (authRes.ok) {
+      const ct = authRes.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
         const authData = await authRes.json();
+        if (!authRes.ok) {
+          setAuthError(authData.error || 'প্রমাণীকরণ ব্যর্থ হয়েছে।');
+          return;
+        }
         verifiedUser = authData.user as UserProfile;
       }
     } catch {
@@ -608,38 +619,8 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     }
 
     if (!verifiedUser && auth?.currentUser) {
-      const fbUser = auth.currentUser;
-      const email = (fbUser.email || '').toLowerCase();
-      const isOwner = email === 'joydas.21071997@gmail.com';
-
-      let isAdmin = isOwner;
-      if (!isAdmin && db) {
-        try {
-          const adminSnap = await getDoc(doc(db, 'admins', fbUser.uid));
-          isAdmin = adminSnap.exists();
-        } catch {
-          // ignore
-        }
-      }
-
-      verifiedUser = {
-        id: `usr_${fbUser.uid.slice(0, 10)}`,
-        firebaseUid: fbUser.uid,
-        name: fbUser.displayName || email.split('@')[0] || 'Admin',
-        email: fbUser.email || '',
-        role: isAdmin ? 'admin' : 'listener',
-        permissions: isAdmin ? [
-          'manage_stories',
-          'manage_media',
-          'manage_hero',
-          'translate_stories',
-          'manage_categories',
-        ] : undefined,
-        preferredLanguage: 'bn',
-        purchasedStoryIds: [],
-        storyEntitlements: {},
-        membership: { planId: 'npass_monthly_9', priceInr: 9, status: 'INACTIVE' },
-      };
+      const hydrated = await hydrateClientUserFromFirestore(auth.currentUser, 'bn');
+      verifiedUser = hydrated.user;
     }
 
     if (!verifiedUser) {
@@ -681,6 +662,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       return;
     }
     setAuthError(null);
+    setAuthNotice(null);
     setBusy(true);
     try {
       const cred = await signInWithPopup(auth, googleProvider);
@@ -689,16 +671,39 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       const idToken = await cred.user.getIdToken(true);
       await exchangeFirebaseTokenForStudio(idToken);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('auth/popup-closed-by-user') || msg.includes('popup-closed-by-user')) {
+      const formatted = formatFirebaseAuthError(err, 'bn');
+      if (formatted.isCancelled) {
         setAuthError(null);
-      } else if (msg.includes('unauthorized-domain')) {
-        setAuthError('এই ডোমেইনটি লগইন সেটিংসে অনুমোদিত নয়।');
-      } else if (msg.includes('popup-blocked')) {
-        setAuthError('ব্রাউজার সাইন-ইন পপ-আপ ব্লক করেছে। অনুগ্রহ করে পপ-আপ অনুমতি দিন।');
+      } else if (formatted.code === 'auth/popup-blocked' && !isEmbeddedIframe()) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirectErr) {
+          setAuthError(formatFirebaseAuthError(redirectErr, 'bn').message);
+        }
       } else {
-        setAuthError('গুগল সাইন-ইন সম্পন্ন করা যায়নি। আবার চেষ্টা করুন।');
+        setAuthError(formatted.message);
       }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleAdminPasswordReset = async () => {
+    if (!isFirebaseConfigured || !auth) return;
+    setAuthError(null);
+    setAuthNotice(null);
+    const trimmed = authEmail.trim();
+    if (!trimmed || !trimmed.includes('@')) {
+      setAuthError('পাসওয়ার্ড রিসেট করতে উপরে আপনার অনুমোদিত ইমেইল লিখুন।');
+      return;
+    }
+    setBusy(true);
+    try {
+      await sendPasswordResetEmail(auth, trimmed);
+      setAuthNotice('পাসওয়ার্ড রিসেট করার লিংক আপনার ইমেইলে পাঠানো হয়েছে।');
+    } catch (err) {
+      setAuthError(formatFirebaseAuthError(err, 'bn').message);
     } finally {
       setBusy(false);
     }
@@ -711,6 +716,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       return;
     }
     setAuthError(null);
+    setAuthNotice(null);
     if (!authEmail.trim() || !authPassword) {
       setAuthError('বৈধ ইমেইল এবং পাসওয়ার্ড উভয়ই দিন।');
       return;
@@ -724,14 +730,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       setAuthPassword('');
       await exchangeFirebaseTokenForStudio(idToken);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('operation-not-allowed')) {
-        setAuthError(
-          'Firebase Console-এ Email/Password প্রোভাইডার চালু নেই। অনুগ্রহ করে উপরের Google সাইন-ইন ব্যবহার করুন।',
-        );
-      } else {
-        setAuthError('ইমেইল বা পাসওয়ার্ড যাচাই ব্যর্থ হয়েছে। অনুগ্রহ করে সঠিক তথ্য দিন।');
-      }
+      setAuthError(formatFirebaseAuthError(err, 'bn').message);
     } finally {
       setBusy(false);
     }
@@ -1513,6 +1512,12 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
             </div>
           )}
 
+          {authNotice && (
+            <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300 text-center">
+              {authNotice}
+            </div>
+          )}
+
           {authError && (
             <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-300 text-center">
               {authError}
@@ -1567,7 +1572,17 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
             </div>
 
             <div className="space-y-1.5">
-              <label className="block text-xs font-medium text-[#A69E95]">পাসওয়ার্ড</label>
+              <div className="flex items-center justify-between gap-2">
+                <label className="block text-xs font-medium text-[#A69E95]">পাসওয়ার্ড</label>
+                <button
+                  type="button"
+                  disabled={busy || !isFirebaseConfigured}
+                  onClick={handleAdminPasswordReset}
+                  className="text-[11px] font-medium text-red-400 hover:text-red-300 cursor-pointer disabled:opacity-50"
+                >
+                  পাসওয়ার্ড ভুলে গেছেন?
+                </button>
+              </div>
               <input
                 type="password"
                 required

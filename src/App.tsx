@@ -9,13 +9,16 @@ import {
   Sparkles,
   Ticket,
 } from 'lucide-react';
-import { onIdTokenChanged, signOut } from 'firebase/auth';
+import { getRedirectResult, onIdTokenChanged, signOut } from 'firebase/auth';
 import { auth, db, isFirebaseConfigured } from './firebase';
 import { collection, doc, getDocFromServer, getDocs, onSnapshot, query, where } from 'firebase/firestore';
 import { INITIAL_STORIES, INITIAL_CATEGORIES, NPASS_MONTHLY_PRICE_INR } from '../server/catalogSeed';
 import {
+  ensureBootstrappedAdminDoc,
   fetchPublishedAdsFromFirestore,
+  hydrateClientUserFromFirestore,
   syncPlaybackProgressToFirestore,
+  syncUserAccountToFirestore,
 } from './services/firestoreService';
 import { resolveArtworkUrl } from './utils/artworkRegistry';
 import type {
@@ -255,6 +258,28 @@ export default function App() {
       return;
     }
 
+    let cancelled = false;
+    void (async () => {
+      try {
+        const redirectCred = await getRedirectResult(auth);
+        if (redirectCred?.user && !cancelled) {
+          await ensureBootstrappedAdminDoc(redirectCred.user).catch(() => {});
+          await syncUserAccountToFirestore(redirectCred.user, language).catch(() => {});
+          const freshToken = await redirectCred.user.getIdToken();
+          localStorage.setItem(STORAGE_TOKEN_KEY, freshToken);
+          setAuthToken(freshToken);
+          const hydrated = await hydrateClientUserFromFirestore(redirectCred.user, language);
+          if (!cancelled) {
+            setUser(hydrated.user);
+            setOrders(hydrated.orders);
+            setProgress(hydrated.progress);
+          }
+        }
+      } catch {
+        // Non-blocking redirect recovery
+      }
+    })();
+
     const unsubscribe = onIdTokenChanged(auth, async (fbUser) => {
       if (fbUser) {
         try {
@@ -270,10 +295,15 @@ export default function App() {
           localStorage.removeItem(STORAGE_TOKEN_KEY);
           setAuthToken(null);
           setUser(null);
+          setOrders([]);
+          setProgress([]);
         }
       }
     });
-    return () => unsubscribe();
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -338,6 +368,20 @@ export default function App() {
             }
           } catch {
             // Keep INITIAL_STORIES fallback
+          }
+        }
+
+        if (isFirebaseConfigured && auth) {
+          try {
+            await auth.authStateReady();
+            if (auth.currentUser) {
+              const hydrated = await hydrateClientUserFromFirestore(auth.currentUser);
+              fetchedUser = hydrated.user;
+              fetchedOrders = hydrated.orders;
+              fetchedProgress = hydrated.progress;
+            }
+          } catch {
+            // Keep unauthenticated guest view if Firebase Auth restoration fails
           }
         }
       }

@@ -1,5 +1,11 @@
 import { initializeApp, type FirebaseApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, type Auth } from 'firebase/auth';
+import {
+  browserLocalPersistence,
+  getAuth,
+  GoogleAuthProvider,
+  setPersistence,
+  type Auth,
+} from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore, type Firestore } from 'firebase/firestore';
 import {
   getDownloadURL,
@@ -48,6 +54,9 @@ if (isFirebaseConfigured) {
     ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
     : getFirestore(app);
   auth = getAuth(app);
+  if (typeof window !== 'undefined') {
+    void setPersistence(auth, browserLocalPersistence).catch(() => {});
+  }
   storage = firebaseConfig.storageBucket ? getStorage(app) : null;
   googleProvider = new GoogleAuthProvider();
   googleProvider.setCustomParameters({ prompt: 'select_account' });
@@ -199,7 +208,7 @@ export async function testFirestoreConnection(): Promise<{
 async function testConnection() {
   if (!db) return;
   try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
+    await getDocFromServer(doc(db, 'categories', 'audio'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
       console.error('Please check your Firebase configuration.');
@@ -207,6 +216,6 @@ async function testConnection() {
   }
 }
 
-if (isFirebaseConfigured) {
+if (isFirebaseConfigured && typeof window !== 'undefined') {
   void testConnection();
 }

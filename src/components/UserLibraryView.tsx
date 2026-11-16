@@ -2,8 +2,11 @@ import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2,
   Clock,
+  Eye,
+  EyeOff,
   Headphones,
   LogOut,
+  Mail,
   Play,
   Receipt,
   Settings,
@@ -12,9 +15,24 @@ import {
   Ticket,
   XCircle,
 } from 'lucide-react';
-import { signInWithPopup } from 'firebase/auth';
+import {
+  createUserWithEmailAndPassword,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signInWithRedirect,
+  updateProfile,
+  type User,
+} from 'firebase/auth';
 import { auth, googleProvider, isFirebaseConfigured } from '../firebase';
-import { syncUserAccountToFirestore } from '../services/firestoreService';
+import {
+  ensureBootstrappedAdminDoc,
+  formatFirebaseAuthError,
+  hydrateClientUserFromFirestore,
+  isEmbeddedIframe,
+  syncUserAccountToFirestore,
+} from '../services/firestoreService';
 import type {
   Episode,
   Language,
@@ -107,10 +125,16 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
   const [isRegisterMode, setIsRegisterMode] = useState(false);
   const [nameInput, setNameInput] = useState('');
   const [emailInput, setEmailInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [marketingConsent, setMarketingConsent] = useState(false);
   const [marketingConsentCapturedInSession, setMarketingConsentCapturedInSession] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
+  const [emailVerifiedStatus, setEmailVerifiedStatus] = useState<boolean>(
+    () => auth?.currentUser?.emailVerified ?? true,
+  );
 
   useEffect(() => {
     const normalized = normalizeTab(initialTab);
@@ -119,17 +143,25 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
     }
   }, [initialTab]);
 
-  const handleGoogleFirebaseLogin = async () => {
-    if (!isFirebaseConfigured || !auth || !googleProvider) {
-      setAuthError('Firebase বর্তমানে বন্ধ রয়েছে। অনুগ্রহ করে ইমেইল দিয়ে লগইন করুন।');
-      return;
-    }
-    setAuthError(null);
-    setAuthBusy(true);
+  useEffect(() => {
+    setEmailVerifiedStatus(auth?.currentUser ? auth.currentUser.emailVerified : true);
+  }, [user]);
+
+  const completeFirebaseUserSession = async (
+    fbUser: User,
+    forceTokenRefresh = false,
+  ): Promise<boolean> => {
+    await ensureBootstrappedAdminDoc(fbUser).catch(() => {});
+    await syncUserAccountToFirestore(fbUser, language).catch(() => {});
+    const idToken = await fbUser.getIdToken(forceTokenRefresh);
+
+    let resolvedPayload: {
+      user: UserProfile;
+      orders: OrderRecord[];
+      progress: PlaybackProgress[];
+    } | null = null;
+
     try {
-      const cred = await signInWithPopup(auth, googleProvider);
-      await syncUserAccountToFirestore(cred.user, language).catch(() => {});
-      const idToken = await cred.user.getIdToken();
       const res = await fetch('/api/auth/firebase', {
         method: 'POST',
         headers: {
@@ -138,41 +170,132 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
         },
         body: JSON.stringify({ language }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setAuthError(data.error || 'Firebase sign-in failed.');
-        return;
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (!res.ok) {
+          setAuthError(data.error || 'Firebase authentication verification failed.');
+          return false;
+        }
+        resolvedPayload = {
+          user: data.user,
+          orders: data.orders || [],
+          progress: data.progress || [],
+        };
       }
-      onLoginSuccess({
-        token: idToken,
-        user: data.user,
-        orders: data.orders || [],
-        progress: data.progress || [],
-      });
-      setActiveTab('my_stories');
+    } catch {
+      // Static Firebase Hosting or offline fallback continues to Firestore client hydration
+    }
+
+    if (!resolvedPayload) {
+      resolvedPayload = await hydrateClientUserFromFirestore(fbUser, language);
+    }
+
+    setEmailVerifiedStatus(fbUser.emailVerified);
+    setPasswordInput('');
+    onLoginSuccess({
+      token: idToken,
+      user: resolvedPayload.user,
+      orders: resolvedPayload.orders,
+      progress: resolvedPayload.progress,
+    });
+    return true;
+  };
+
+  const handleGoogleFirebaseLogin = async () => {
+    if (!isFirebaseConfigured || !auth || !googleProvider) {
+      setAuthError('Firebase বর্তমানে বন্ধ রয়েছে। অনুগ্রহ করে ইমেইল দিয়ে লগইন করুন।');
+      return;
+    }
+    setAuthError(null);
+    setAuthNotice(null);
+    setAuthBusy(true);
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      const ok = await completeFirebaseUserSession(cred.user, false);
+      if (ok) {
+        setActiveTab('my_stories');
+      }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('auth/popup-closed-by-user') || msg.includes('popup-closed-by-user')) {
+      const formatted = formatFirebaseAuthError(err, language);
+      if (formatted.isCancelled) {
         setAuthError(null);
-      } else if (msg.includes('unauthorized-domain')) {
-        setAuthError(
+      } else if (formatted.code === 'auth/popup-blocked' && !isEmbeddedIframe()) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirectErr) {
+          setAuthError(formatFirebaseAuthError(redirectErr, language).message);
+        }
+      } else {
+        setAuthError(formatted.message);
+      }
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handlePasswordReset = async () => {
+    if (!isFirebaseConfigured || !auth) return;
+    setAuthError(null);
+    setAuthNotice(null);
+    const trimmedEmail = emailInput.trim();
+    if (!trimmedEmail || !trimmedEmail.includes('@')) {
+      setAuthError(t.library.enterEmailForReset);
+      return;
+    }
+    setAuthBusy(true);
+    try {
+      await sendPasswordResetEmail(auth, trimmedEmail);
+      setAuthNotice(t.library.passwordResetSent);
+    } catch (err) {
+      const formatted = formatFirebaseAuthError(err, language);
+      setAuthError(formatted.message);
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleResendVerification = async () => {
+    if (!isFirebaseConfigured || !auth?.currentUser) return;
+    setAuthError(null);
+    setAuthNotice(null);
+    setAuthBusy(true);
+    try {
+      await sendEmailVerification(auth.currentUser);
+      setAuthNotice(t.library.verificationEmailSent);
+    } catch (err) {
+      setAuthError(formatFirebaseAuthError(err, language).message);
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleRefreshVerification = async () => {
+    if (!isFirebaseConfigured || !auth?.currentUser) return;
+    setAuthError(null);
+    setAuthNotice(null);
+    setAuthBusy(true);
+    try {
+      await auth.currentUser.reload();
+      const updatedUser = auth.currentUser;
+      setEmailVerifiedStatus(updatedUser.emailVerified);
+      if (updatedUser.emailVerified) {
+        await completeFirebaseUserSession(updatedUser, true);
+        setAuthNotice(
           language === 'bn'
-            ? 'এই ডোমেইনটি অথেন্টিকেশন সেটিংসে অনুমোদিত নয়।'
-            : 'यह डोमेन अधिकृत नहीं है।',
-        );
-      } else if (msg.includes('popup-blocked')) {
-        setAuthError(
-          language === 'bn'
-            ? 'ব্রাউজার সাইন-ইন পপ-আপ ব্লক করেছে। অনুগ্রহ করে পপ-আপ অনুমতি দিন।'
-            : 'ब्राउज़र ने साइन-इन पॉप-अप ब्लॉक किया है। कृपया पॉप-अप की अनुमति दें।',
+            ? 'আপনার ইমেইল সফলভাবে যাচাইকৃত হয়েছে!'
+            : 'आपका ईमेल सफलतापूर्वक सत्यापित हो गया है!',
         );
       } else {
-        setAuthError(
+        setAuthNotice(
           language === 'bn'
-            ? 'গুগল সাইন-ইন সম্পন্ন করা যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।'
-            : 'Google साइन-इन पूर्ण नहीं हो सका। कृपया पुनः प्रयास करें।',
+            ? 'ইমেইল এখনো যাচাই সম্পন্ন হয়নি। অনুগ্রহ করে ইনবক্সের ভেরিফিকেশন লিংকে ক্লিক করুন।'
+            : 'ईमेल अभी सत्यापित नहीं हुआ है। कृपया अपने इनबॉक्स में दिए लिंक पर क्लिक करें।',
         );
       }
+    } catch (err) {
+      setAuthError(formatFirebaseAuthError(err, language).message);
     } finally {
       setAuthBusy(false);
     }
@@ -181,21 +304,87 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
+    setAuthNotice(null);
+    const trimmedEmail = emailInput.trim();
+    const trimmedName = nameInput.trim();
+
+    if (!trimmedEmail || !trimmedEmail.includes('@')) {
+      setAuthError(
+        language === 'bn'
+          ? 'অনুগ্রহ করে একটি সঠিক ইমেইল ঠিকানা লিখুন।'
+          : 'कृपया एक वैध ईमेल पता दर्ज करें।',
+      );
+      return;
+    }
+
     setAuthBusy(true);
     try {
+      if (isFirebaseConfigured && auth) {
+        if (!passwordInput || (isRegisterMode && passwordInput.length < 6)) {
+          setAuthError(
+            language === 'bn'
+              ? 'কমপক্ষে ৬ অক্ষরের পাসওয়ার্ড দিন।'
+              : 'कृपया कम से कम 6 अक्षरों का पासवर्ड दर्ज करें।',
+          );
+          return;
+        }
+
+        if (isRegisterMode) {
+          const cred = await createUserWithEmailAndPassword(auth, trimmedEmail, passwordInput);
+          if (trimmedName) {
+            await updateProfile(cred.user, { displayName: trimmedName }).catch(() => {});
+          }
+          let verificationSent = false;
+          try {
+            await sendEmailVerification(cred.user);
+            verificationSent = true;
+          } catch {
+            // Non-blocking if rate-limited
+          }
+          if (marketingConsent) {
+            setMarketingConsentCapturedInSession(true);
+          }
+          const ok = await completeFirebaseUserSession(cred.user, true);
+          if (ok) {
+            if (verificationSent) {
+              setAuthNotice(t.library.verificationEmailSent);
+              setActiveTab('account');
+            } else {
+              setActiveTab('my_stories');
+            }
+          }
+        } else {
+          const cred = await signInWithEmailAndPassword(auth, trimmedEmail, passwordInput);
+          const ok = await completeFirebaseUserSession(cred.user, false);
+          if (ok) {
+            setActiveTab('my_stories');
+          }
+        }
+        return;
+      }
+
+      // Non-Firebase Express local fallback only
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: emailInput.trim(),
-          name: nameInput.trim(),
+          email: trimmedEmail,
+          name: trimmedName,
           language,
         }),
       });
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        setAuthError(
+          language === 'bn'
+            ? 'অথেন্টিকেশন সার্ভারের সাথে সংযোগ করা যাচ্ছে না।'
+            : 'प्रमाणीकरण सर्वर से संपर्क नहीं हो पा रहा है।',
+        );
+        return;
+      }
       const data = await res.json();
       if (!res.ok) {
         setAuthError(data.error || 'Unable to sign in.');
-        setAuthBusy(false);
         return;
       }
       if (isRegisterMode && marketingConsent) {
@@ -203,8 +392,12 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
       }
       onLoginSuccess(data);
       setActiveTab('my_stories');
-    } catch {
-      setAuthError('Network error while signing in.');
+    } catch (err) {
+      if (isFirebaseConfigured) {
+        setAuthError(formatFirebaseAuthError(err, language).message);
+      } else {
+        setAuthError('Network error while signing in.');
+      }
     } finally {
       setAuthBusy(false);
     }
@@ -580,6 +773,45 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
                     {t.library.freeAccountSummary}
                   </p>
 
+                  {isFirebaseConfigured && auth?.currentUser && !emailVerifiedStatus && (
+                    <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 p-3.5 space-y-2.5 text-xs text-amber-200">
+                      <div className="flex items-start gap-2">
+                        <Mail className="h-4 w-4 text-amber-300 shrink-0 mt-0.5" />
+                        <p className="leading-relaxed">{t.library.emailNotVerifiedBanner}</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2 pl-6">
+                        <button
+                          type="button"
+                          disabled={authBusy}
+                          onClick={handleResendVerification}
+                          className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/35 text-amber-200 font-semibold cursor-pointer disabled:opacity-50"
+                        >
+                          {t.library.resendVerificationEmail}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={authBusy}
+                          onClick={handleRefreshVerification}
+                          className="px-3 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-[#F5F2EB] font-semibold cursor-pointer disabled:opacity-50"
+                        >
+                          {t.library.refreshVerificationStatus}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {authNotice && (
+                    <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
+                      {authNotice}
+                    </div>
+                  )}
+
+                  {authError && (
+                    <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-300">
+                      {authError}
+                    </div>
+                  )}
+
                   {marketingConsentCapturedInSession && (
                     <p className="text-xs text-emerald-300 rounded-xl bg-emerald-500/10 border border-emerald-500/25 p-3">
                       {t.library.marketingConsentPendingNote}
@@ -680,6 +912,12 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
                     </p>
                   </div>
 
+                  {authNotice && (
+                    <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
+                      {authNotice}
+                    </div>
+                  )}
+
                   {authError && (
                     <div className="p-3 rounded-lg bg-gradient-to-b from-[#1C1216] to-[#120B0E] border border-red-500/30 text-xs text-[#F5F2EB]">
                       {authError}
@@ -708,12 +946,57 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
                     <input
                       type="email"
                       required
+                      autoComplete="email"
                       value={emailInput}
                       onChange={(e) => setEmailInput(e.target.value)}
                       placeholder="listener@example.com"
                       className="w-full h-11 px-3.5 rounded-xl bg-[#0B090E] border border-white/[0.08] text-sm text-[#F5F2EB] focus:outline-none focus:border-[#EF4444]"
                     />
                   </div>
+
+                  {isFirebaseConfigured && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="block text-xs font-medium text-[#A69E95]">
+                          {t.library.passwordLabel}
+                        </label>
+                        {!isRegisterMode && (
+                          <button
+                            type="button"
+                            disabled={authBusy}
+                            onClick={handlePasswordReset}
+                            className="text-[11px] font-medium text-red-400 hover:text-red-300 cursor-pointer disabled:opacity-50"
+                          >
+                            {t.library.forgotPassword}
+                          </button>
+                        )}
+                      </div>
+                      <div className="relative">
+                        <input
+                          type={showPassword ? 'text' : 'password'}
+                          required
+                          minLength={isRegisterMode ? 6 : undefined}
+                          autoComplete={isRegisterMode ? 'new-password' : 'current-password'}
+                          value={passwordInput}
+                          onChange={(e) => setPasswordInput(e.target.value)}
+                          placeholder={t.library.passwordPlaceholder}
+                          className="w-full h-11 pl-3.5 pr-10 rounded-xl bg-[#0B090E] border border-white/[0.08] text-sm text-[#F5F2EB] focus:outline-none focus:border-[#EF4444]"
+                        />
+                        <button
+                          type="button"
+                          aria-label={showPassword ? 'Hide password' : 'Show password'}
+                          onClick={() => setShowPassword((prev) => !prev)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-[#A69E95] hover:text-[#F5F2EB] cursor-pointer"
+                        >
+                          {showPassword ? (
+                            <EyeOff className="h-4 w-4" />
+                          ) : (
+                            <Eye className="h-4 w-4" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Optional Email Updates & Marketing Consent (Unchecked by default, non-blocking) */}
                   {isRegisterMode && (
@@ -787,7 +1070,11 @@ export const UserLibraryView: React.FC<UserLibraryViewProps> = ({
                   <div className="pt-1 flex flex-col gap-2 text-center">
                     <button
                       type="button"
-                      onClick={() => setIsRegisterMode((prev) => !prev)}
+                      onClick={() => {
+                        setIsRegisterMode((prev) => !prev);
+                        setAuthError(null);
+                        setAuthNotice(null);
+                      }}
                       className="text-xs text-red-400 hover:text-red-300 cursor-pointer"
                     >
                       {isRegisterMode ? t.library.switchToLogin : t.library.switchToRegister}

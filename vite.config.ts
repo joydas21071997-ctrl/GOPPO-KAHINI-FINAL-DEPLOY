@@ -42,6 +42,10 @@ export default defineConfig(() => {
               handler: 'NetworkOnly',
             },
             {
+              urlPattern: /^https:\/\/securetoken\.googleapis\.com\/.*/i,
+              handler: 'NetworkOnly',
+            },
+            {
               urlPattern: ({ request }) => request.mode === 'navigate',
               handler: 'NetworkFirst',
               options: {
