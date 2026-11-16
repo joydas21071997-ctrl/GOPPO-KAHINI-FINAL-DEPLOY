@@ -193,6 +193,7 @@ export default function App() {
   });
   const [loading, setLoading] = useState<boolean>(false);
   const [catalogHydrated, setCatalogHydrated] = useState<boolean>(false);
+  const [sandboxModeEnabled, setSandboxModeEnabled] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [activeRoute, setActiveRoute] = useState<ActiveRoute>(() => {
@@ -305,6 +306,7 @@ export default function App() {
           if (data.stories && data.stories.length > 0) storiesData = data.stories;
           if (data.categories) categoriesData = data.categories;
           if (data.nPassMonthlyPriceInr) nPassPrice = data.nPassMonthlyPriceInr;
+          setSandboxModeEnabled(Boolean(data.sandboxModeEnabled));
           fetchedUser = data.user || null;
           fetchedOrders = data.orders || [];
           fetchedProgress = data.progress || [];
@@ -312,6 +314,7 @@ export default function App() {
             latestAds = normalizeAdSettings(data.adSettings, 'published');
           }
         } else {
+          setSandboxModeEnabled(false);
           throw new Error('Static hosting fallback');
         }
       } catch {
@@ -1793,6 +1796,7 @@ export default function App() {
                   story={targetStory}
                   t={t}
                   user={user}
+                  authToken={authToken}
                   progress={progress}
                   activeTrackId={activeTrackId}
                   isPlaying={isPlaying}
@@ -1843,6 +1847,7 @@ export default function App() {
                   episode={found.episode}
                   t={t}
                   user={user}
+                  authToken={authToken}
                   progress={progress}
                   activeTrackId={activeTrackId}
                   isPlaying={isPlaying}
@@ -1982,6 +1987,7 @@ export default function App() {
         t={t}
         user={user}
         authToken={authToken}
+        sandboxModeEnabled={sandboxModeEnabled}
         onClose={() => setCheckoutTarget((prev) => ({ ...prev, open: false }))}
         onRequireLogin={() => {
           setCheckoutTarget((prev) => ({ ...prev, open: false }));
@@ -1990,6 +1996,19 @@ export default function App() {
         onOrderUpdated={({ user: updatedUser, orders: updatedOrders }) => {
           if (updatedUser) setUser(updatedUser);
           setOrders(updatedOrders);
+          if (updatedUser && authToken) {
+            void fetch('/api/bootstrap', {
+              cache: 'no-store',
+              headers: { Authorization: `Bearer ${authToken}` },
+            })
+              .then((r) => (r.ok ? r.json() : null))
+              .then((data: BootstrapPayload | null) => {
+                if (data?.stories && data.stories.length > 0) {
+                  setStories(data.stories);
+                }
+              })
+              .catch(() => {});
+          }
         }}
       />
 

@@ -31,6 +31,7 @@ interface EpisodeDetailsViewProps {
   episode: Episode;
   t: UIStrings;
   user: UserProfile | null;
+  authToken?: string | null;
   progress?: PlaybackProgress[];
   activeTrackId?: string;
   isPlaying: boolean;
@@ -48,6 +49,7 @@ export const EpisodeDetailsView: React.FC<EpisodeDetailsViewProps> = ({
   episode,
   t,
   user,
+  authToken,
   progress = [],
   activeTrackId,
   isPlaying,
@@ -60,7 +62,42 @@ export const EpisodeDetailsView: React.FC<EpisodeDetailsViewProps> = ({
   onBuyTicket,
 }) => {
   const [videoTheaterOpen, setVideoTheaterOpen] = useState(false);
+  const [authorizedVideoUrl, setAuthorizedVideoUrl] = useState<string>('');
   const [shareOpen, setShareOpen] = useState(false);
+
+  const openAuthorizedVideoTheater = async () => {
+    const rawUrl = episode.videoUrl || '';
+    if (!rawUrl) return;
+    if (isFreeStory(story) || !rawUrl.startsWith('/api/uploads/') || rawUrl.includes('mt=')) {
+      setAuthorizedVideoUrl(rawUrl);
+      setVideoTheaterOpen(true);
+      return;
+    }
+    try {
+      const res = await fetch('/api/media/authorize', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          storyId: story.id,
+          episodeId: episode.id,
+          isTrailer: false,
+          mediaKind: 'video',
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.streamUrl) {
+        setAuthorizedVideoUrl(data.streamUrl);
+        setVideoTheaterOpen(true);
+        return;
+      }
+    } catch {
+      // Fallback below
+    }
+    onBuyTicket(story);
+  };
 
   const isFree = isFreeStory(story);
   const hasVerifiedAccess = hasVerifiedStoryAccess(user, story);
@@ -119,7 +156,7 @@ export const EpisodeDetailsView: React.FC<EpisodeDetailsViewProps> = ({
       />
 
       {/* Video Theater for Video Episodes */}
-      {videoTheaterOpen && episode.videoUrl && (
+      {videoTheaterOpen && (authorizedVideoUrl || episode.videoUrl) && (
         <div className="rounded-2xl bg-black border border-red-500/30 overflow-hidden shadow-2xl p-4 sm:p-6 space-y-3">
           <div className="flex items-center justify-between text-xs sm:text-sm">
             <div className="flex items-center gap-2 text-red-400 font-semibold">
@@ -141,7 +178,7 @@ export const EpisodeDetailsView: React.FC<EpisodeDetailsViewProps> = ({
               controls
               autoPlay
               playsInline
-              src={episode.videoUrl}
+              src={authorizedVideoUrl || episode.videoUrl}
               onEnded={() => onEpisodeComplete?.(story, episode)}
               className="h-full w-full object-contain"
             />
@@ -260,7 +297,7 @@ export const EpisodeDetailsView: React.FC<EpisodeDetailsViewProps> = ({
                   {episode.videoUrl && (
                     <button
                       type="button"
-                      onClick={() => setVideoTheaterOpen(true)}
+                      onClick={() => void openAuthorizedVideoTheater()}
                       className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-sm font-semibold shadow-md shadow-red-950/40 cursor-pointer"
                     >
                       <Video className="h-4 w-4" />

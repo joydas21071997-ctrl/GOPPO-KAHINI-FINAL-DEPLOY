@@ -19,6 +19,7 @@ interface CheckoutModalProps {
   t: UIStrings;
   user: UserProfile | null;
   authToken: string | null;
+  sandboxModeEnabled?: boolean;
   onClose: () => void;
   onRequireLogin: () => void;
   onOrderUpdated: (payload: {
@@ -37,6 +38,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   t,
   user,
   authToken,
+  sandboxModeEnabled = false,
   onClose,
   onRequireLogin,
   onOrderUpdated,
@@ -293,21 +295,23 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                     {t.checkout.proceedToPay} · <span className="font-mono-num">₹{amountInr}</span>
                   </button>
 
-                  {/* QA / Sandbox Backend Verification Option */}
-                  <div className="pt-2 border-t border-white/[0.06] space-y-1.5">
-                    <button
-                      type="button"
-                      disabled={sandboxBusy}
-                      onClick={handleSandboxTestVerification}
-                      className="w-full py-2.5 px-4 rounded-xl bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.07] text-xs font-medium text-red-400 hover:text-red-300 transition-colors flex items-center justify-center gap-2 cursor-pointer"
-                    >
-                      <ShieldCheck className="h-4 w-4 text-[#EF4444]" />
-                      <span>{t.checkout.sandboxVerifyButton}</span>
-                    </button>
-                    <p className="text-[11px] text-[#A69E95]/75 text-center">
-                      {t.checkout.sandboxDisclaimer}
-                    </p>
-                  </div>
+                  {/* QA / Sandbox Backend Verification Option (Shown ONLY when explicitly allowed in non-production) */}
+                  {sandboxModeEnabled && (
+                    <div className="pt-2 border-t border-white/[0.06] space-y-1.5">
+                      <button
+                        type="button"
+                        disabled={sandboxBusy}
+                        onClick={handleSandboxTestVerification}
+                        className="w-full py-2.5 px-4 rounded-xl bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.07] text-xs font-medium text-red-400 hover:text-red-300 transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        <ShieldCheck className="h-4 w-4 text-[#EF4444]" />
+                        <span>{t.checkout.sandboxVerifyButton}</span>
+                      </button>
+                      <p className="text-[11px] text-[#A69E95]/75 text-center">
+                        {t.checkout.sandboxDisclaimer}
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -352,15 +356,17 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                       <span>{t.checkout.retryPayment}</span>
                     </button>
 
-                    <button
-                      type="button"
-                      disabled={sandboxBusy}
-                      onClick={handleSandboxTestVerification}
-                      className="flex-1 inline-flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-xs font-semibold text-red-400 hover:text-red-300 transition-colors cursor-pointer"
-                    >
-                      <ShieldCheck className="h-4 w-4 text-[#EF4444]" />
-                      <span>{t.checkout.sandboxVerifyButton}</span>
-                    </button>
+                    {sandboxModeEnabled && (
+                      <button
+                        type="button"
+                        disabled={sandboxBusy}
+                        onClick={handleSandboxTestVerification}
+                        className="flex-1 inline-flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-xs font-semibold text-red-400 hover:text-red-300 transition-colors cursor-pointer"
+                      >
+                        <ShieldCheck className="h-4 w-4 text-[#EF4444]" />
+                        <span>{t.checkout.sandboxVerifyButton}</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               )}

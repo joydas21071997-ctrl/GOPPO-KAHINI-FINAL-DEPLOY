@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import dotenv from 'dotenv';
 import express from 'express';
 import type { Request, Response } from 'express';
@@ -36,6 +37,28 @@ import {
   syncOrderToFirestoreRest,
   syncStoryToFirestoreRest,
 } from './server/firestoreSync.ts';
+import {
+  createSignedMediaToken,
+  createUniqueUploadFilename,
+  extractUploadedFilenameFromUrl,
+  fetchFromGcsFallback,
+  MAX_IMAGE_BYTES,
+  MAX_MEDIA_BYTES,
+  type MediaFolder,
+  type MediaKind,
+  type MediaManifestEntry,
+  type MediaTier,
+  mirrorUploadToGcsIfAvailable,
+  resolveExtensionSpec,
+  resolveOrCreateSigningSecret,
+  resolveSafeUploadPath,
+  SAFE_UPLOAD_FILENAME_REGEX,
+  stripMediaTokenQuery,
+  verifyGatewayPaymentSignature,
+  verifyMediaMagicBytes,
+  verifySignedMediaToken,
+  verifyWebhookHmacSignature,
+} from './server/mediaStorage.ts';
 import type {
   AccessPolicy,
   AdminPermission,
@@ -60,12 +83,6 @@ import {
 
 dotenv.config();
 
-const PORT = Number(process.env.PORT || 3000);
-const LIVE_GATEWAY_CONNECTED =
-  process.env.PAYMENT_GATEWAY_ENABLED === 'true' &&
-  Boolean(process.env.PAYMENT_GATEWAY_KEY_ID) &&
-  Boolean(process.env.PAYMENT_GATEWAY_KEY_SECRET);
-
 interface PersistedState {
   stories: StoryItem[];
   categoryToggles: Record<ContentCategory, boolean>;
@@ -73,6 +90,7 @@ interface PersistedState {
   editors?: Record<string, EditorGrant>; // keyed by lowercase email
   sessions: Record<string, string>; // opaque listener tokens only: token -> userId
   orders: OrderRecord[];
+  usedGatewayPaymentIds?: string[]; // replay prevention for gateway payments
   progressByUser: Record<string, PlaybackProgress[]>;
   nPassMonthlyPriceInr?: number;
   pricingMigratedTo9?: boolean;
@@ -80,13 +98,60 @@ interface PersistedState {
   adDraftSettings?: AdSettings;
 }
 
-const DATA_DIR = path.resolve(process.cwd(), '.goppo-data');
-const STATE_FILE = path.join(DATA_DIR, 'platform-state-v2.json');
-const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+export interface GoppoAppOptions {
+  dataDir?: string;
+  verifyTokenImpl?: (token: string) => Promise<VerifiedFirebaseToken | null>;
+  isProductionOverride?: boolean;
+  allowSandboxOverride?: boolean;
+  paymentGatewayOverride?: {
+    enabled: boolean;
+    keyId?: string;
+    keySecret?: string;
+    webhookSecret?: string;
+  };
+  skipCloudHydration?: boolean;
 }
+
+export function createGoppoApp(options: GoppoAppOptions = {}) {
+  const IS_CLOUD_RUN = Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
+  const IS_PRODUCTION =
+    typeof options.isProductionOverride === 'boolean'
+      ? options.isProductionOverride
+      : process.env.NODE_ENV === 'production' || IS_CLOUD_RUN;
+
+  const SANDBOX_PAYMENT_ALLOWED =
+    !IS_PRODUCTION &&
+    (typeof options.allowSandboxOverride === 'boolean'
+      ? options.allowSandboxOverride
+      : process.env.ALLOW_SANDBOX_PAYMENT === 'true');
+
+  const gatewayCfg = options.paymentGatewayOverride || {
+    enabled: process.env.PAYMENT_GATEWAY_ENABLED === 'true',
+    keyId: process.env.PAYMENT_GATEWAY_KEY_ID,
+    keySecret: process.env.PAYMENT_GATEWAY_KEY_SECRET,
+    webhookSecret: process.env.PAYMENT_GATEWAY_WEBHOOK_SECRET,
+  };
+  const LIVE_GATEWAY_CONNECTED =
+    Boolean(gatewayCfg.enabled) && Boolean(gatewayCfg.keyId) && Boolean(gatewayCfg.keySecret);
+
+  const verifyIdTokenFn = options.verifyTokenImpl || verifyFirebaseIdToken;
+
+  const DATA_DIR = path.resolve(
+    process.cwd(),
+    options.dataDir || process.env.GOPPO_DATA_DIR || '.goppo-data',
+  );
+  const STATE_FILE = path.join(DATA_DIR, 'platform-state-v2.json');
+  const MEDIA_MANIFEST_FILE = path.join(DATA_DIR, 'media-manifest.json');
+  const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+  const CHUNK_STAGING_DIR = path.join(DATA_DIR, 'upload-staging');
+
+  for (const dir of [DATA_DIR, UPLOADS_DIR, CHUNK_STAGING_DIR]) {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  }
+
+  const MEDIA_SIGNING_SECRET = resolveOrCreateSigningSecret(DATA_DIR);
 
 function createDefaultState(): PersistedState {
   const categoryToggles: Record<ContentCategory, boolean> = {
@@ -172,6 +237,9 @@ function loadState(): PersistedState {
         }
         parsed.stories = sortStoriesNewestFirst(parsed.stories);
         parsed.editors = parsed.editors || {};
+        parsed.usedGatewayPaymentIds = Array.isArray(parsed.usedGatewayPaymentIds)
+          ? parsed.usedGatewayPaymentIds
+          : [];
         for (const u of Object.values(parsed.users || {})) {
           ensureUserEntitlements(u);
         }
@@ -197,11 +265,57 @@ function loadState(): PersistedState {
   }
   const fresh = createDefaultState();
   fresh.pricingMigratedTo9 = true;
+  fresh.usedGatewayPaymentIds = [];
   return fresh;
 }
 
 const state: PersistedState = loadState();
 const audioBufferCache = new Map<string, Buffer>();
+
+function loadMediaManifest(): Record<string, MediaManifestEntry> {
+  try {
+    if (fs.existsSync(MEDIA_MANIFEST_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(MEDIA_MANIFEST_FILE, 'utf-8')) as Record<
+        string,
+        MediaManifestEntry
+      >;
+      if (parsed && typeof parsed === 'object') return parsed;
+    }
+  } catch {
+    // Fallback to empty manifest
+  }
+  return {};
+}
+
+const mediaManifest: Record<string, MediaManifestEntry> = loadMediaManifest();
+
+function saveMediaManifest(): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(MEDIA_MANIFEST_FILE, JSON.stringify(mediaManifest, null, 2), 'utf-8');
+  } catch {
+    // Non-fatal in read-only environments
+  }
+}
+
+interface ChunkUploadSession {
+  uploadId: string;
+  userId: string;
+  originalName: string;
+  mediaType: MediaKind;
+  folder: MediaFolder;
+  mimeType: string;
+  resolvedExt: string;
+  accessTier: MediaTier;
+  expectedSize: number;
+  maxBytes: number;
+  tempPath: string;
+  bytesWritten: number;
+  createdAt: number;
+}
+const uploadSessions = new Map<string, ChunkUploadSession>();
 
 function saveState(): void {
   try {
@@ -324,7 +438,7 @@ async function resolveAuthenticatedUser(req: Request): Promise<UserProfile | nul
 
   // Cryptographically verify Firebase Auth ID tokens (JWT format)
   if (token.split('.').length === 3) {
-    const verified = await verifyFirebaseIdToken(token);
+    const verified = await verifyIdTokenFn(token);
     if (!verified) return null;
     return resolveFirebaseUserProfile(token, verified);
   }
@@ -393,56 +507,166 @@ function userHasStoryAccess(user: UserProfile | null, story: StoryItem): boolean
   return hasTicket || hasNPass;
 }
 
-async function startServer() {
+function sanitizeStoriesForViewer(stories: StoryItem[], user: UserProfile | null): StoryItem[] {
+  const isStaff = hasStaffPermission(user, 'manage_stories') || user?.role === 'admin';
+  const viewerUid = user?.id || 'viewer';
+
+  return stories.map((story) => {
+    const isFree = story.ticketPriceInr <= 0;
+    const entitled = isStaff || isFree || userHasStoryAccess(user, story);
+
+    const signIfProtectedUpload = (rawUrl: string | undefined, epId: string): string | undefined => {
+      if (!rawUrl) return undefined;
+      const clean = stripMediaTokenQuery(rawUrl);
+      if (!clean) return undefined;
+      const fn = extractUploadedFilenameFromUrl(clean);
+      if (fn && !isFree) {
+        const mt = createSignedMediaToken(
+          MEDIA_SIGNING_SECRET,
+          { fn, sid: story.id, eid: epId, uid: viewerUid },
+          7200,
+        );
+        return `/api/uploads/${fn}?mt=${encodeURIComponent(mt)}`;
+      }
+      return clean;
+    };
+
+    const sanitizedEpisodes = (story.episodes || []).map((ep) => {
+      if (!entitled) {
+        // Security: redact premium episode URLs for unauthenticated/unpaid visitors
+        const { audioUrl: _a, videoUrl: _v, ...safeEp } = ep;
+        return safeEp;
+      }
+      return {
+        ...ep,
+        audioUrl: signIfProtectedUpload(ep.audioUrl, ep.id),
+        videoUrl: signIfProtectedUpload(ep.videoUrl, ep.id),
+      };
+    });
+
+    return {
+      ...story,
+      episodes: sanitizedEpisodes,
+    };
+  });
+}
+
+function isUploadFilePubliclyAccessible(fileName: string): {
+  isPublicFree: boolean;
+  isDraftOnly: boolean;
+  owningStories: StoryItem[];
+} {
+  const targetUrl = `/api/uploads/${fileName}`;
+  const manifest = mediaManifest[fileName];
+  if (fileName.startsWith('prem_') || manifest?.accessTier === 'premium') {
+    const owning = state.stories.filter((s) =>
+      s.episodes.some(
+        (ep) =>
+          stripMediaTokenQuery(ep.audioUrl) === targetUrl ||
+          stripMediaTokenQuery(ep.videoUrl) === targetUrl,
+      ),
+    );
+    return { isPublicFree: false, isDraftOnly: false, owningStories: owning };
+  }
+
+  let referencedInFreeOrTrailer = false;
+  const premiumOwning: StoryItem[] = [];
+  let referencedInDraftOnly = false;
+
+  for (const s of state.stories) {
+    const isTrailerOrArt =
+      stripMediaTokenQuery(s.trailerAudioUrl) === targetUrl ||
+      stripMediaTokenQuery(s.trailerVideoUrl) === targetUrl ||
+      stripMediaTokenQuery(s.coverArt) === targetUrl ||
+      stripMediaTokenQuery(s.heroArt) === targetUrl;
+
+    const inEpisode = s.episodes.some(
+      (ep) =>
+        stripMediaTokenQuery(ep.audioUrl) === targetUrl ||
+        stripMediaTokenQuery(ep.videoUrl) === targetUrl,
+    );
+
+    if (isTrailerOrArt && s.publicationStatus === 'published') {
+      referencedInFreeOrTrailer = true;
+    } else if (inEpisode) {
+      if (s.publicationStatus !== 'published') {
+        referencedInDraftOnly = true;
+      } else if (s.ticketPriceInr <= 0) {
+        referencedInFreeOrTrailer = true;
+      } else {
+        premiumOwning.push(s);
+      }
+    }
+  }
+
+  if (premiumOwning.length > 0 && !referencedInFreeOrTrailer) {
+    return { isPublicFree: false, isDraftOnly: false, owningStories: premiumOwning };
+  }
+  if (referencedInDraftOnly && !referencedInFreeOrTrailer) {
+    return { isPublicFree: false, isDraftOnly: true, owningStories: [] };
+  }
+  return { isPublicFree: true, isDraftOnly: false, owningStories: [] };
+}
+
   saveState();
-  void hydrateCatalogFromFirestoreIfAvailable().then((cloudData) => {
-    if (!cloudData) return;
-    let updated = false;
-    if (cloudData.stories && cloudData.stories.length > 0) {
-      const merged = new Map<string, StoryItem>();
-      for (const s of state.stories) merged.set(s.id, s);
-      for (const s of cloudData.stories) {
-        if (s.id && s.title) merged.set(s.id, s);
+  if (!options.skipCloudHydration) {
+    void hydrateCatalogFromFirestoreIfAvailable().then((cloudData) => {
+      if (!cloudData) return;
+      let updated = false;
+      if (cloudData.stories && cloudData.stories.length > 0) {
+        const merged = new Map<string, StoryItem>();
+        for (const s of state.stories) merged.set(s.id, s);
+        for (const s of cloudData.stories) {
+          if (s.id && s.title) merged.set(s.id, s);
+        }
+        state.stories = sortStoriesNewestFirst(Array.from(merged.values()));
+        updated = true;
       }
-      state.stories = sortStoriesNewestFirst(Array.from(merged.values()));
-      updated = true;
-    }
-    if (cloudData.categories) {
-      for (const cat of cloudData.categories) {
-        if (cat.id && typeof cat.enabledByAdmin === 'boolean') {
-          state.categoryToggles[cat.id] = cat.enabledByAdmin;
-          updated = true;
+      if (cloudData.categories) {
+        for (const cat of cloudData.categories) {
+          if (cat.id && typeof cat.enabledByAdmin === 'boolean') {
+            state.categoryToggles[cat.id] = cat.enabledByAdmin;
+            updated = true;
+          }
         }
       }
-    }
-    if (cloudData.editors) {
-      state.editors = state.editors || {};
-      for (const ed of cloudData.editors) {
-        if (ed.email) {
-          state.editors[ed.email.toLowerCase()] = ed;
-          updated = true;
+      if (cloudData.editors) {
+        state.editors = state.editors || {};
+        for (const ed of cloudData.editors) {
+          if (ed.email) {
+            state.editors[ed.email.toLowerCase()] = ed;
+            updated = true;
+          }
         }
       }
-    }
-    if (updated) saveState();
-  });
-  void fetchPublishedAdSettingsFromFirestoreRest().then((cloudAds) => {
-    if (!cloudAds) return;
-    const fsTime = cloudAds.publishedAt ? Date.parse(cloudAds.publishedAt) : 0;
-    const localTime = state.adSettings?.publishedAt ? Date.parse(state.adSettings.publishedAt) : 0;
-    const localVer = state.adSettings?.version || 1;
-    if (
-      (cloudAds.enabled && !state.adSettings?.enabled) ||
-      fsTime > localTime ||
-      cloudAds.version > localVer
-    ) {
-      state.adSettings = cloudAds;
-      state.adDraftSettings = normalizeAdSettings({ ...cloudAds, status: 'draft' }, 'draft');
-      saveState();
-    }
-  });
+      if (updated) saveState();
+    });
+    void fetchPublishedAdSettingsFromFirestoreRest().then((cloudAds) => {
+      if (!cloudAds) return;
+      const fsTime = cloudAds.publishedAt ? Date.parse(cloudAds.publishedAt) : 0;
+      const localTime = state.adSettings?.publishedAt ? Date.parse(state.adSettings.publishedAt) : 0;
+      const localVer = state.adSettings?.version || 1;
+      if (
+        (cloudAds.enabled && !state.adSettings?.enabled) ||
+        fsTime > localTime ||
+        cloudAds.version > localVer
+      ) {
+        state.adSettings = cloudAds;
+        state.adDraftSettings = normalizeAdSettings({ ...cloudAds, status: 'draft' }, 'draft');
+        saveState();
+      }
+    });
+  }
+
   const app = express();
-  app.use(express.json({ limit: '50mb' }));
+  app.use(
+    express.json({
+      limit: '50mb',
+      verify: (req, _res, buf) => {
+        (req as Request & { rawBody?: Buffer }).rawBody = buf;
+      },
+    }),
+  );
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
   // ---------------------------------------------------------------------------
@@ -464,10 +688,11 @@ async function startServer() {
     res.setHeader('Expires', '0');
 
     const payload: BootstrapPayload = {
-      stories: visibleStories,
+      stories: sanitizeStoriesForViewer(visibleStories, user),
       categories: computeCategories(),
       nPassMonthlyPriceInr: state.nPassMonthlyPriceInr || NPASS_MONTHLY_PRICE_INR,
       liveGatewayConnected: LIVE_GATEWAY_CONNECTED,
+      sandboxModeEnabled: SANDBOX_PAYMENT_ALLOWED,
       user,
       orders: user ? state.orders.filter((o) => o.userId === user.id) : [],
       progress: user ? state.progressByUser[user.id] || [] : [],
@@ -615,7 +840,7 @@ async function startServer() {
       return;
     }
 
-    const verified = await verifyFirebaseIdToken(idToken);
+    const verified = await verifyIdTokenFn(idToken);
     if (!verified) {
       res.status(401).json({ error: 'Invalid or expired Firebase authentication token.' });
       return;
@@ -659,9 +884,10 @@ async function startServer() {
       existing?.role === 'admin' ||
       existing?.role === 'editor';
 
-    if (isStaffAccount) {
+    if (isStaffAccount || existing?.firebaseUid) {
       res.status(403).json({
-        error: 'Administrator and Editor accounts must sign in securely via Firebase Authentication.',
+        error:
+          'Google/Firebase-linked, Administrator, and Editor accounts must sign in securely via Firebase Authentication.',
       });
       return;
     }
@@ -798,61 +1024,29 @@ async function startServer() {
     state.orders.unshift(order);
     saveState();
     void syncOrderToFirestoreRest(order);
-    res.json({ order, liveGatewayConnected: LIVE_GATEWAY_CONNECTED });
-  });
-
-  app.post('/api/orders/:orderId/verify', async (req: Request, res: Response) => {
-    const user = await resolveAuthenticatedUser(req);
-    if (!user) {
-      res.status(401).json({ error: 'Authentication required.' });
-      return;
-    }
-    const order = state.orders.find((o) => o.orderId === req.params.orderId && o.userId === user.id);
-    if (!order) {
-      res.status(404).json({ error: 'Order not found.' });
-      return;
-    }
-
-    if (!LIVE_GATEWAY_CONNECTED) {
-      order.status = 'FAILED';
-      order.failureReason = 'LIVE_GATEWAY_NOT_AUTHORIZED';
-      saveState();
-      res.status(503).json({
-        verified: false,
-        reason: 'LIVE_GATEWAY_NOT_AUTHORIZED',
-        order,
-        orders: state.orders.filter((o) => o.userId === user.id),
-      });
-      return;
-    }
-
-    order.status = 'FAILED';
-    order.failureReason = 'MISSING_GATEWAY_SIGNATURE';
-    saveState();
-    res.status(400).json({
-      verified: false,
-      reason: 'MISSING_GATEWAY_SIGNATURE',
+    res.json({
       order,
-      orders: state.orders.filter((o) => o.userId === user.id),
+      liveGatewayConnected: LIVE_GATEWAY_CONNECTED,
+      sandboxModeEnabled: SANDBOX_PAYMENT_ALLOWED,
     });
   });
 
-  app.post('/api/orders/:orderId/sandbox-verify', async (req: Request, res: Response) => {
-    const user = await resolveAuthenticatedUser(req);
-    if (!user) {
-      res.status(401).json({ error: 'Authentication required.' });
-      return;
-    }
-    const order = state.orders.find((o) => o.orderId === req.params.orderId && o.userId === user.id);
-    if (!order) {
-      res.status(404).json({ error: 'Order not found.' });
-      return;
-    }
-
+  function grantVerifiedOrderEntitlement(
+    order: OrderRecord,
+    user: UserProfile,
+    opts: { isSandbox: boolean; gatewayPaymentId?: string },
+  ): void {
     order.status = 'VERIFIED';
     order.failureReason = undefined;
-    order.isSandboxVerification = true;
+    order.isSandboxVerification = opts.isSandbox;
     order.verifiedAt = new Date().toISOString();
+
+    if (opts.gatewayPaymentId) {
+      state.usedGatewayPaymentIds = state.usedGatewayPaymentIds || [];
+      if (!state.usedGatewayPaymentIds.includes(opts.gatewayPaymentId)) {
+        state.usedGatewayPaymentIds.push(opts.gatewayPaymentId);
+      }
+    }
 
     if (order.itemType === 'story_ticket' && order.storyId) {
       user.storyEntitlements = user.storyEntitlements || {};
@@ -880,7 +1074,7 @@ async function startServer() {
         activatedAt: now.toISOString(),
         renewsAt: renews.toISOString(),
         verifiedOrderId: order.orderId,
-        isSandboxVerification: true,
+        isSandboxVerification: opts.isSandbox,
       };
     }
 
@@ -889,6 +1083,228 @@ async function startServer() {
     if (order.itemType === 'story_ticket' && order.storyId && user.storyEntitlements?.[order.storyId]) {
       void syncEntitlementToFirestoreRest(user, user.storyEntitlements[order.storyId]);
     }
+  }
+
+  app.post('/api/orders/:orderId/verify', async (req: Request, res: Response) => {
+    const user = await resolveAuthenticatedUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const order = state.orders.find((o) => o.orderId === req.params.orderId && o.userId === user.id);
+    if (!order) {
+      res.status(404).json({ error: 'Order not found.' });
+      return;
+    }
+
+    // Strict Idempotency: an already VERIFIED order must never grant duplicate listens
+    if (order.status === 'VERIFIED') {
+      res.json({
+        verified: true,
+        alreadyVerified: true,
+        order,
+        user,
+        orders: state.orders.filter((o) => o.userId === user.id),
+      });
+      return;
+    }
+
+    if (!LIVE_GATEWAY_CONNECTED || !gatewayCfg.keySecret) {
+      if (order.status === 'PENDING') {
+        order.status = 'FAILED';
+        order.failureReason = 'LIVE_GATEWAY_NOT_AUTHORIZED';
+        saveState();
+      }
+      res.status(503).json({
+        verified: false,
+        reason: 'LIVE_GATEWAY_NOT_AUTHORIZED',
+        order,
+        orders: state.orders.filter((o) => o.userId === user.id),
+      });
+      return;
+    }
+
+    const gatewayPaymentId =
+      typeof req.body?.razorpay_payment_id === 'string'
+        ? req.body.razorpay_payment_id.trim()
+        : typeof req.body?.gatewayPaymentId === 'string'
+          ? req.body.gatewayPaymentId.trim()
+          : '';
+    const gatewayOrderId =
+      typeof req.body?.razorpay_order_id === 'string'
+        ? req.body.razorpay_order_id.trim()
+        : typeof req.body?.gatewayOrderId === 'string'
+          ? req.body.gatewayOrderId.trim()
+          : order.orderId;
+    const signature =
+      typeof req.body?.razorpay_signature === 'string'
+        ? req.body.razorpay_signature.trim()
+        : typeof req.body?.signature === 'string'
+          ? req.body.signature.trim()
+          : '';
+    const rawCurrency = typeof req.body?.currency === 'string' ? req.body.currency.trim().toUpperCase() : 'INR';
+    const rawAmountInr =
+      typeof req.body?.amountInr === 'number'
+        ? req.body.amountInr
+        : typeof req.body?.amountPaise === 'number'
+          ? req.body.amountPaise / 100
+          : order.amountInr;
+
+    if (!gatewayPaymentId || !signature) {
+      order.status = 'FAILED';
+      order.failureReason = 'MISSING_GATEWAY_SIGNATURE';
+      saveState();
+      res.status(400).json({
+        verified: false,
+        reason: 'MISSING_GATEWAY_SIGNATURE',
+        order,
+        orders: state.orders.filter((o) => o.userId === user.id),
+      });
+      return;
+    }
+
+    if (rawCurrency !== 'INR' || Math.abs(rawAmountInr - order.amountInr) > 0.01) {
+      order.status = 'FAILED';
+      order.failureReason = 'AMOUNT_OR_CURRENCY_MISMATCH';
+      saveState();
+      res.status(400).json({
+        verified: false,
+        reason: 'AMOUNT_OR_CURRENCY_MISMATCH',
+        order,
+        orders: state.orders.filter((o) => o.userId === user.id),
+      });
+      return;
+    }
+
+    if (state.usedGatewayPaymentIds?.includes(gatewayPaymentId)) {
+      res.status(409).json({
+        verified: false,
+        reason: 'DUPLICATE_PAYMENT_ID',
+        order,
+        orders: state.orders.filter((o) => o.userId === user.id),
+      });
+      return;
+    }
+
+    const signatureValid = verifyGatewayPaymentSignature({
+      orderId: order.orderId,
+      gatewayOrderId,
+      gatewayPaymentId,
+      signature,
+      secret: gatewayCfg.keySecret,
+    });
+    if (!signatureValid) {
+      order.status = 'FAILED';
+      order.failureReason = 'INVALID_GATEWAY_SIGNATURE';
+      saveState();
+      res.status(400).json({
+        verified: false,
+        reason: 'INVALID_GATEWAY_SIGNATURE',
+        order,
+        orders: state.orders.filter((o) => o.userId === user.id),
+      });
+      return;
+    }
+
+    grantVerifiedOrderEntitlement(order, user, {
+      isSandbox: false,
+      gatewayPaymentId,
+    });
+    res.json({
+      verified: true,
+      order,
+      user,
+      orders: state.orders.filter((o) => o.userId === user.id),
+    });
+  });
+
+  app.post('/api/orders/webhook', (req: Request, res: Response) => {
+    const webhookSecret = (gatewayCfg.webhookSecret || '').trim();
+    if (!LIVE_GATEWAY_CONNECTED || !webhookSecret) {
+      res.status(503).json({ error: 'Payment gateway webhook is not configured.' });
+      return;
+    }
+
+    const sigHeader = String(
+      req.headers['x-razorpay-signature'] || req.headers['x-gateway-signature'] || '',
+    );
+    const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+    if (!rawBody || !verifyWebhookHmacSignature(rawBody, sigHeader, webhookSecret)) {
+      res.status(401).json({ error: 'Invalid webhook signature.' });
+      return;
+    }
+
+    const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
+    const gatewayPaymentId =
+      typeof req.body?.gatewayPaymentId === 'string' ? req.body.gatewayPaymentId.trim() : '';
+    const currency =
+      typeof req.body?.currency === 'string' ? req.body.currency.trim().toUpperCase() : '';
+    const amountInr = Number(req.body?.amountInr);
+
+    const order = state.orders.find((o) => o.orderId === orderId);
+    if (!order) {
+      res.status(404).json({ error: 'Order not found.' });
+      return;
+    }
+    if (order.status === 'VERIFIED') {
+      res.json({ ok: true, alreadyVerified: true });
+      return;
+    }
+    if (currency !== 'INR' || Number.isNaN(amountInr) || Math.abs(amountInr - order.amountInr) > 0.01) {
+      res.status(400).json({ error: 'Amount or currency mismatch.' });
+      return;
+    }
+    if (gatewayPaymentId && state.usedGatewayPaymentIds?.includes(gatewayPaymentId)) {
+      res.status(409).json({ error: 'Duplicate gateway payment ID.' });
+      return;
+    }
+
+    const ownerUser = state.users[order.userId];
+    if (!ownerUser) {
+      res.status(404).json({ error: 'Order owner not found.' });
+      return;
+    }
+
+    grantVerifiedOrderEntitlement(order, ownerUser, {
+      isSandbox: false,
+      gatewayPaymentId: gatewayPaymentId || undefined,
+    });
+    res.json({ ok: true, verified: true, orderId: order.orderId });
+  });
+
+  app.post('/api/orders/:orderId/sandbox-verify', async (req: Request, res: Response) => {
+    if (!SANDBOX_PAYMENT_ALLOWED) {
+      res.status(403).json({
+        verified: false,
+        reason: 'SANDBOX_DISABLED',
+        error: 'Sandbox payment verification is strictly disabled in production and live environments.',
+      });
+      return;
+    }
+
+    const user = await resolveAuthenticatedUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const order = state.orders.find((o) => o.orderId === req.params.orderId && o.userId === user.id);
+    if (!order) {
+      res.status(404).json({ error: 'Order not found.' });
+      return;
+    }
+
+    if (order.status === 'VERIFIED') {
+      res.json({
+        verified: true,
+        alreadyVerified: true,
+        order,
+        user,
+        orders: state.orders.filter((o) => o.userId === user.id),
+      });
+      return;
+    }
+
+    grantVerifiedOrderEntitlement(order, user, { isSandbox: true });
     res.json({
       verified: true,
       order,
@@ -1017,6 +1433,127 @@ async function startServer() {
   });
 
   // ---------------------------------------------------------------------------
+  // MEDIA PLAYBACK AUTHORIZATION (SHORT-LIVED SIGNED STREAM URLS)
+  // ---------------------------------------------------------------------------
+  app.post('/api/media/authorize', async (req: Request, res: Response) => {
+    const user = await resolveAuthenticatedUser(req);
+    const storyId = typeof req.body?.storyId === 'string' ? req.body.storyId.trim() : '';
+    const episodeId = typeof req.body?.episodeId === 'string' ? req.body.episodeId.trim() : '';
+    const requestedFileName =
+      typeof req.body?.fileName === 'string' ? req.body.fileName.trim() : '';
+    const isTrailer = Boolean(req.body?.isTrailer);
+    const mediaKind = req.body?.mediaKind === 'video' ? 'video' : 'audio';
+
+    // Staff preview authorization for newly uploaded files not yet saved to a story
+    if (!storyId && requestedFileName) {
+      if (!user || (!hasStaffPermission(user, 'manage_media') && !hasStaffPermission(user, 'manage_stories'))) {
+        res.status(user ? 403 : 401).json({ error: 'Authorized staff credentials required.' });
+        return;
+      }
+      const safe = resolveSafeUploadPath(UPLOADS_DIR, requestedFileName);
+      if (!safe) {
+        res.status(400).json({ error: 'Invalid media filename.' });
+        return;
+      }
+      const mt = createSignedMediaToken(
+        MEDIA_SIGNING_SECRET,
+        { fn: safe.fileName, uid: user.id },
+        7200,
+      );
+      res.json({ streamUrl: `/api/uploads/${safe.fileName}?mt=${encodeURIComponent(mt)}` });
+      return;
+    }
+
+    const story = state.stories.find((s) => s.id === storyId);
+    if (!story) {
+      res.status(404).json({ error: 'Story not found.' });
+      return;
+    }
+
+    const isAuthorizedStaff =
+      user?.role === 'admin' ||
+      hasStaffPermission(user, 'manage_stories') ||
+      hasStaffPermission(user, 'manage_media');
+
+    if (story.publicationStatus !== 'published' && !isAuthorizedStaff) {
+      res.status(403).json({ error: 'Draft content requires staff authorization.' });
+      return;
+    }
+
+    if (isTrailer) {
+      const rawTrailer = mediaKind === 'video' ? story.trailerVideoUrl : story.trailerAudioUrl;
+      if (rawTrailer) {
+        const clean = stripMediaTokenQuery(rawTrailer) || rawTrailer;
+        const fn = extractUploadedFilenameFromUrl(clean);
+        if (fn) {
+          const mt = createSignedMediaToken(
+            MEDIA_SIGNING_SECRET,
+            { fn, sid: story.id, eid: 'trailer', uid: user?.id || 'guest' },
+            7200,
+          );
+          res.json({ streamUrl: `/api/uploads/${fn}?mt=${encodeURIComponent(mt)}` });
+          return;
+        }
+        res.json({ streamUrl: clean });
+        return;
+      }
+      res.json({ streamUrl: `/api/audio/${encodeURIComponent(story.id)}/trailer/trailer.wav` });
+      return;
+    }
+
+    const ep = episodeId ? story.episodes.find((e) => e.id === episodeId) : story.episodes[0];
+    if (!ep) {
+      res.status(404).json({ error: 'Episode not found.' });
+      return;
+    }
+
+    const isFree = story.ticketPriceInr <= 0;
+    if (!isFree && !isAuthorizedStaff) {
+      if (!user) {
+        res.status(401).json({ error: 'Authentication required for premium media.' });
+        return;
+      }
+      if (!userHasStoryAccess(user, story)) {
+        res.status(403).json({ error: 'Verified ticket or eligible active N-Pass required.' });
+        return;
+      }
+    }
+
+    const rawUrl = mediaKind === 'video' ? ep.videoUrl : ep.audioUrl;
+    if (rawUrl) {
+      const clean = stripMediaTokenQuery(rawUrl) || rawUrl;
+      const fn = extractUploadedFilenameFromUrl(clean);
+      if (fn) {
+        const mt = createSignedMediaToken(
+          MEDIA_SIGNING_SECRET,
+          { fn, sid: story.id, eid: ep.id, uid: user?.id || 'guest' },
+          7200,
+        );
+        res.json({ streamUrl: `/api/uploads/${fn}?mt=${encodeURIComponent(mt)}` });
+        return;
+      }
+      res.json({ streamUrl: clean });
+      return;
+    }
+
+    if (mediaKind === 'video') {
+      res.status(404).json({ error: 'Video stream not attached to this episode.' });
+      return;
+    }
+
+    const mt = createSignedMediaToken(
+      MEDIA_SIGNING_SECRET,
+      { sid: story.id, eid: ep.id, uid: user?.id || 'guest' },
+      7200,
+    );
+    res.json({
+      streamUrl: `/api/audio/${encodeURIComponent(story.id)}/episode/${encodeURIComponent(
+        ep.id,
+      )}.wav?mt=${encodeURIComponent(mt)}`,
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // PROTECTED AUDIO STREAMING WITH RANGE SUPPORT (TRAILERS + ENTITLED EPISODES)
   // ---------------------------------------------------------------------------
   app.get('/api/audio/:storyId/:trackType/:trackId.wav', async (req: Request, res: Response) => {
@@ -1031,15 +1568,31 @@ async function startServer() {
     let durationSeconds = story.trailerDurationSeconds || 40;
 
     if (trackType === 'episode') {
-      const user = await resolveAuthenticatedUser(req);
-      const isAuthorizedStaff =
-        user?.role === 'admin' || hasStaffPermission(user, 'manage_stories');
-      if (!isAuthorizedStaff && !userHasStoryAccess(user, story)) {
-        res.status(403).json({
-          error: 'Verified ticket or eligible active membership is required to stream this episode.',
-        });
-        return;
+      const isFree = story.ticketPriceInr <= 0 && story.publicationStatus === 'published';
+      const mtQuery = typeof req.query.mt === 'string' ? req.query.mt.trim() : '';
+      const verifiedMt = mtQuery ? verifySignedMediaToken(MEDIA_SIGNING_SECRET, mtQuery) : null;
+      const validSignedToken = Boolean(
+        verifiedMt && verifiedMt.sid === story.id && verifiedMt.eid === trackId,
+      );
+
+      if (!isFree && !validSignedToken) {
+        const user = await resolveAuthenticatedUser(req);
+        const isAuthorizedStaff =
+          user?.role === 'admin' || hasStaffPermission(user, 'manage_stories');
+        if (!user) {
+          res.status(401).json({
+            error: 'Authentication required to stream this episode.',
+          });
+          return;
+        }
+        if (!isAuthorizedStaff && !userHasStoryAccess(user, story)) {
+          res.status(403).json({
+            error: 'Verified ticket or eligible active membership is required to stream this episode.',
+          });
+          return;
+        }
       }
+
       const ep = story.episodes.find((e) => e.id === trackId);
       if (!ep) {
         res.status(404).send('Episode not found');
@@ -1208,56 +1761,307 @@ async function startServer() {
     res.json({ editors: Object.values(state.editors || {}) });
   });
 
-  // Upload custom audio, video, or image files (Requires manage_media)
+  // Upload custom audio, video, or image files (Requires manage_media + MIME/magic-byte/size/overwrite protections)
   app.post('/api/admin/upload-media', async (req: Request, res: Response) => {
     const user = await resolveAuthenticatedUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
     if (!hasStaffPermission(user, 'manage_media')) {
       res.status(403).json({ error: 'Permission required: manage_media.' });
       return;
     }
-    const { fileData, fileName, mediaType } = req.body || {};
+
+    const { fileData, fileName, mediaType, mimeType, accessTier: rawTier } = req.body || {};
     if (!fileData || typeof fileData !== 'string') {
       res.status(400).json({ error: 'File data is required.' });
       return;
     }
+
     try {
       let buffer: Buffer;
-      let ext = mediaType === 'video' ? 'mp4' : mediaType === 'image' ? 'jpg' : 'mp3';
+      let parsedMime = typeof mimeType === 'string' ? mimeType : '';
+
       if (fileData.startsWith('data:')) {
-        const matches = fileData.match(/^data:([A-Za-z0-9-+\/]+);base64,(.+)$/);
-        if (matches && matches[2]) {
-          const mime = matches[1].toLowerCase();
-          if (mime.includes('wav')) ext = 'wav';
-          else if (mime.includes('webm')) ext = 'webm';
-          else if (mime.includes('ogg')) ext = 'ogg';
-          else if (mime.includes('mp4') || mime.includes('m4a')) ext = mime.startsWith('video/') || mediaType === 'video' ? 'mp4' : 'm4a';
-          else if (mime.includes('mov') || mime.includes('quicktime')) ext = 'mov';
-          else if (mime.includes('mkv') || mime.includes('matroska')) ext = 'mkv';
-          else if (mime.includes('png')) ext = 'png';
-          else if (mime.includes('webp')) ext = 'webp';
-          else if (mime.includes('jpeg') || mime.includes('jpg')) ext = 'jpg';
-          buffer = Buffer.from(matches[2], 'base64');
-        } else {
-          buffer = Buffer.from(fileData, 'base64');
+        const matches = fileData.match(/^data:([A-Za-z0-9.+-]+\/[A-Za-z0-9.+-]+)(?:;[A-Za-z0-9=_-]+)*;base64,(.+)$/);
+        if (!matches || !matches[2]) {
+          res.status(400).json({ error: 'Invalid data URI media payload.' });
+          return;
         }
+        parsedMime = matches[1].toLowerCase();
+        buffer = Buffer.from(matches[2], 'base64');
       } else {
         buffer = Buffer.from(fileData, 'base64');
       }
 
-      const originalBase = fileName ? path.basename(fileName, path.extname(fileName)).replace(/[^a-zA-Z0-9_-]/g, '_') : 'upload';
-      const safeName = `${originalBase}_${Date.now()}.${ext}`;
-      const filePath = path.join(UPLOADS_DIR, safeName);
-      fs.writeFileSync(filePath, buffer);
+      if (!buffer || buffer.length === 0) {
+        res.status(400).json({ error: 'Uploaded media payload is empty.' });
+        return;
+      }
 
-      const publicUrl = `/api/uploads/${safeName}`;
-      res.json({
-        url: publicUrl,
-        fileName: safeName,
+      const specResult = resolveExtensionSpec(
+        typeof fileName === 'string' ? fileName : undefined,
+        parsedMime,
+        typeof mediaType === 'string' ? mediaType : undefined,
+      );
+      if (!specResult) {
+        res.status(400).json({ error: 'Unsupported or disallowed file extension / MIME type.' });
+        return;
+      }
+
+      const { spec, resolvedExt } = specResult;
+      if (buffer.length > spec.maxBytes) {
+        res.status(413).json({
+          error: `File exceeds maximum allowed size (${Math.round(spec.maxBytes / (1024 * 1024))} MB).`,
+        });
+        return;
+      }
+
+      if (!verifyMediaMagicBytes(buffer.subarray(0, 64), resolvedExt)) {
+        res.status(400).json({
+          error: 'File signature mismatch: content does not match declared media format.',
+        });
+        return;
+      }
+
+      const accessTier: MediaTier =
+        spec.kind === 'image' ? 'free' : rawTier === 'premium' ? 'premium' : 'free';
+      const safeName = createUniqueUploadFilename(
+        typeof fileName === 'string' ? fileName : undefined,
+        resolvedExt,
+        accessTier,
+      );
+      const resolved = resolveSafeUploadPath(UPLOADS_DIR, safeName);
+      if (!resolved) {
+        res.status(400).json({ error: 'Generated filename rejected by path policy.' });
+        return;
+      }
+
+      // Atomic create (O_EXCL): never overwrites existing files
+      fs.writeFileSync(resolved.targetPath, buffer, { flag: 'wx' });
+
+      const gcsObjectPath = await mirrorUploadToGcsIfAvailable({
+        filePath: resolved.targetPath,
+        fileName: resolved.fileName,
+        accessTier,
+        folder: spec.folder,
+        mimeType: spec.mime,
+      });
+
+      mediaManifest[resolved.fileName] = {
+        fileName: resolved.fileName,
+        accessTier,
+        folder: spec.folder,
+        mediaType: spec.kind,
+        mimeType: spec.mime,
         sizeBytes: buffer.length,
-        mediaType: ext === 'mp4' || ext === 'webm' || ext === 'mov' || ext === 'mkv' ? 'video' : ext === 'jpg' || ext === 'png' || ext === 'webp' ? 'image' : 'audio',
+        uploadedByUid: user.firebaseUid || user.id,
+        gcsObjectPath,
+        createdAt: new Date().toISOString(),
+      };
+      saveMediaManifest();
+
+      const canonicalUrl = `/api/uploads/${resolved.fileName}`;
+      const previewToken = createSignedMediaToken(
+        MEDIA_SIGNING_SECRET,
+        { fn: resolved.fileName, uid: user.id },
+        7200,
+      );
+      res.json({
+        url: canonicalUrl,
+        previewUrl: `${canonicalUrl}?mt=${encodeURIComponent(previewToken)}`,
+        fileName: resolved.fileName,
+        accessTier,
+        sizeBytes: buffer.length,
+        mediaType: spec.kind,
       });
     } catch {
       res.status(500).json({ error: 'Failed to process and store media file.' });
+    }
+  });
+
+  // Chunked Resumable Upload Protocol (Supports up to 150MB audio/video cleanly with progress %)
+  app.post('/api/admin/upload-media/init', async (req: Request, res: Response) => {
+    const user = await resolveAuthenticatedUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    if (!hasStaffPermission(user, 'manage_media')) {
+      res.status(403).json({ error: 'Permission required: manage_media.' });
+      return;
+    }
+
+    const { fileName, fileSize, mediaType, mimeType, accessTier: rawTier } = req.body || {};
+    const sizeNum = Number(fileSize);
+    if (!fileName || typeof fileName !== 'string' || !Number.isFinite(sizeNum) || sizeNum <= 0) {
+      res.status(400).json({ error: 'Valid fileName and positive fileSize are required.' });
+      return;
+    }
+
+    const specResult = resolveExtensionSpec(
+      fileName,
+      typeof mimeType === 'string' ? mimeType : '',
+      typeof mediaType === 'string' ? mediaType : undefined,
+    );
+    if (!specResult) {
+      res.status(400).json({ error: 'Unsupported or disallowed file type.' });
+      return;
+    }
+
+    const { spec, resolvedExt } = specResult;
+    if (sizeNum > spec.maxBytes) {
+      res.status(413).json({
+        error: `File exceeds maximum allowed size (${Math.round(spec.maxBytes / (1024 * 1024))} MB).`,
+      });
+      return;
+    }
+
+    const accessTier: MediaTier =
+      spec.kind === 'image' ? 'free' : rawTier === 'premium' ? 'premium' : 'free';
+    const uploadId = crypto.randomBytes(16).toString('hex');
+    const tempPath = path.join(CHUNK_STAGING_DIR, `${uploadId}.part`);
+
+    uploadSessions.set(uploadId, {
+      uploadId,
+      userId: user.id,
+      originalName: fileName,
+      mediaType: spec.kind,
+      folder: spec.folder,
+      mimeType: spec.mime,
+      resolvedExt,
+      accessTier,
+      expectedSize: sizeNum,
+      maxBytes: spec.maxBytes,
+      tempPath,
+      bytesWritten: 0,
+      createdAt: Date.now(),
+    });
+
+    res.json({ uploadId, chunkSize: 4 * 1024 * 1024 });
+  });
+
+  app.put(
+    '/api/admin/upload-media/chunk/:uploadId',
+    express.raw({ type: 'application/octet-stream', limit: '8mb' }),
+    async (req: Request, res: Response) => {
+      const user = await resolveAuthenticatedUser(req);
+      if (!user || !hasStaffPermission(user, 'manage_media')) {
+        res.status(user ? 403 : 401).json({ error: 'Permission required: manage_media.' });
+        return;
+      }
+
+      const session = uploadSessions.get(req.params.uploadId);
+      if (!session || session.userId !== user.id) {
+        res.status(404).json({ error: 'Upload session not found.' });
+        return;
+      }
+
+      const chunk = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (chunk.length === 0) {
+        res.status(400).json({ error: 'Empty upload chunk.' });
+        return;
+      }
+      if (session.bytesWritten + chunk.length > session.maxBytes || session.bytesWritten + chunk.length > session.expectedSize) {
+        uploadSessions.delete(session.uploadId);
+        fs.rmSync(session.tempPath, { force: true });
+        res.status(413).json({ error: 'Uploaded data exceeded declared or allowed file size.' });
+        return;
+      }
+
+      fs.appendFileSync(session.tempPath, chunk);
+      session.bytesWritten += chunk.length;
+      res.json({ bytesWritten: session.bytesWritten, expectedSize: session.expectedSize });
+    },
+  );
+
+  app.post('/api/admin/upload-media/complete/:uploadId', async (req: Request, res: Response) => {
+    const user = await resolveAuthenticatedUser(req);
+    if (!user || !hasStaffPermission(user, 'manage_media')) {
+      res.status(user ? 403 : 401).json({ error: 'Permission required: manage_media.' });
+      return;
+    }
+
+    const session = uploadSessions.get(req.params.uploadId);
+    if (!session || session.userId !== user.id) {
+      res.status(404).json({ error: 'Upload session not found.' });
+      return;
+    }
+    uploadSessions.delete(session.uploadId);
+
+    try {
+      if (!fs.existsSync(session.tempPath) || session.bytesWritten !== session.expectedSize) {
+        fs.rmSync(session.tempPath, { force: true });
+        res.status(400).json({ error: 'Incomplete upload stream.' });
+        return;
+      }
+
+      const fd = fs.openSync(session.tempPath, 'r');
+      const head = Buffer.alloc(64);
+      const bytesRead = fs.readSync(fd, head, 0, 64, 0);
+      fs.closeSync(fd);
+
+      if (!verifyMediaMagicBytes(head.subarray(0, bytesRead), session.resolvedExt)) {
+        fs.rmSync(session.tempPath, { force: true });
+        res.status(400).json({
+          error: 'File signature mismatch: content does not match declared media format.',
+        });
+        return;
+      }
+
+      const safeName = createUniqueUploadFilename(
+        session.originalName,
+        session.resolvedExt,
+        session.accessTier,
+      );
+      const resolved = resolveSafeUploadPath(UPLOADS_DIR, safeName);
+      if (!resolved || fs.existsSync(resolved.targetPath)) {
+        fs.rmSync(session.tempPath, { force: true });
+        res.status(409).json({ error: 'Target upload collision or unsafe filename.' });
+        return;
+      }
+
+      fs.renameSync(session.tempPath, resolved.targetPath);
+
+      const gcsObjectPath = await mirrorUploadToGcsIfAvailable({
+        filePath: resolved.targetPath,
+        fileName: resolved.fileName,
+        accessTier: session.accessTier,
+        folder: session.folder,
+        mimeType: session.mimeType,
+      });
+
+      mediaManifest[resolved.fileName] = {
+        fileName: resolved.fileName,
+        accessTier: session.accessTier,
+        folder: session.folder,
+        mediaType: session.mediaType,
+        mimeType: session.mimeType,
+        sizeBytes: session.bytesWritten,
+        uploadedByUid: user.firebaseUid || user.id,
+        gcsObjectPath,
+        createdAt: new Date().toISOString(),
+      };
+      saveMediaManifest();
+
+      const canonicalUrl = `/api/uploads/${resolved.fileName}`;
+      const previewToken = createSignedMediaToken(
+        MEDIA_SIGNING_SECRET,
+        { fn: resolved.fileName, uid: user.id },
+        7200,
+      );
+      res.json({
+        url: canonicalUrl,
+        previewUrl: `${canonicalUrl}?mt=${encodeURIComponent(previewToken)}`,
+        fileName: resolved.fileName,
+        accessTier: session.accessTier,
+        sizeBytes: session.bytesWritten,
+        mediaType: session.mediaType,
+      });
+    } catch {
+      fs.rmSync(session.tempPath, { force: true });
+      res.status(500).json({ error: 'Failed to finalize uploaded media file.' });
     }
   });
 
@@ -1390,15 +2194,77 @@ Respond with strictly valid JSON in this exact structure:
     });
   });
 
-  // Serve stored uploads directly
-  app.get('/api/uploads/:fileName', (req: Request, res: Response) => {
-    const fileName = path.basename(req.params.fileName);
-    const targetPath = path.join(UPLOADS_DIR, fileName);
-    if (!fs.existsSync(targetPath)) {
-      res.status(404).send('Uploaded file not found.');
+  // Serve stored uploads with path traversal protection, MIME hardening, and premium entitlement control
+  app.get('/api/uploads/:fileName', async (req: Request, res: Response) => {
+    const resolved = resolveSafeUploadPath(UPLOADS_DIR, req.params.fileName || '');
+    if (!resolved) {
+      res.status(400).json({ error: 'Invalid media filename or unsafe path.' });
       return;
     }
-    res.sendFile(targetPath);
+
+    const { fileName, targetPath } = resolved;
+    const accessInfo = isUploadFilePubliclyAccessible(fileName);
+
+    if (!accessInfo.isPublicFree) {
+      const mtQuery = typeof req.query.mt === 'string' ? req.query.mt.trim() : '';
+      const verifiedMt = mtQuery ? verifySignedMediaToken(MEDIA_SIGNING_SECRET, mtQuery) : null;
+      const validSignedToken = Boolean(verifiedMt && verifiedMt.fn === fileName);
+
+      if (!validSignedToken) {
+        const user = await resolveAuthenticatedUser(req);
+        if (!user) {
+          res.status(401).json({ error: 'Authentication required to access protected media.' });
+          return;
+        }
+        const isStaff =
+          user.role === 'admin' ||
+          hasStaffPermission(user, 'manage_stories') ||
+          hasStaffPermission(user, 'manage_media');
+
+        const hasEntitledStory =
+          !accessInfo.isDraftOnly &&
+          accessInfo.owningStories.some((s) => userHasStoryAccess(user, s));
+
+        if (!isStaff && !hasEntitledStory) {
+          res.status(403).json({
+            error: 'Verified ticket, eligible N-Pass, or authorized staff access required.',
+          });
+          return;
+        }
+      }
+    }
+
+    const manifest = mediaManifest[fileName];
+    const ext = path.extname(fileName).slice(1).toLowerCase();
+    const specResult = resolveExtensionSpec(fileName, manifest?.mimeType, manifest?.mediaType);
+    const safeMime = manifest?.mimeType || specResult?.spec.mime || 'application/octet-stream';
+
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader(
+      'Cache-Control',
+      accessInfo.isPublicFree ? 'public, max-age=86400' : 'private, no-store',
+    );
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    if (fs.existsSync(targetPath)) {
+      res.setHeader('Content-Type', safeMime);
+      res.sendFile(targetPath);
+      return;
+    }
+
+    if (manifest?.gcsObjectPath) {
+      const gcsRes = await fetchFromGcsFallback(manifest.gcsObjectPath, req.headers.range);
+      if (gcsRes) {
+        res.status(gcsRes.status);
+        res.setHeader('Content-Type', safeMime);
+        if (gcsRes.contentRange) res.setHeader('Content-Range', gcsRes.contentRange);
+        if (gcsRes.contentLength) res.setHeader('Content-Length', gcsRes.contentLength);
+        res.end(gcsRes.body);
+        return;
+      }
+    }
+
+    res.status(404).send(`Uploaded media (${ext || 'unknown'}) not found.`);
   });
 
   app.put('/api/admin/categories', async (req: Request, res: Response) => {
@@ -1479,8 +2345,8 @@ Respond with strictly valid JSON in this exact structure:
       trailerDurationLabel: body.trailerDurationLabel || '00:45',
       trailerDurationSeconds: body.trailerDurationSeconds || 40,
       trailerAudioKey: `${id}_trailer`,
-      trailerAudioUrl: body.trailerAudioUrl?.trim() || undefined,
-      trailerVideoUrl: body.trailerVideoUrl?.trim() || undefined,
+      trailerAudioUrl: stripMediaTokenQuery(body.trailerAudioUrl),
+      trailerVideoUrl: stripMediaTokenQuery(body.trailerVideoUrl),
       totalDurationLabel: body.totalDurationLabel || '20m',
       ticketPriceInr:
         body.ticketPriceInr === 0
@@ -1498,8 +2364,8 @@ Respond with strictly valid JSON in this exact structure:
               durationLabel: ep.durationLabel || '14:00',
               durationSeconds: ep.durationSeconds || 75,
               audioKey: ep.audioKey || `${id}_ep_${index + 1}`,
-              audioUrl: ep.audioUrl?.trim() || undefined,
-              videoUrl: ep.videoUrl?.trim() || undefined,
+              audioUrl: stripMediaTokenQuery(ep.audioUrl),
+              videoUrl: stripMediaTokenQuery(ep.videoUrl),
               mediaType:
                 ep.mediaType ||
                 (body.category === 'animation' || body.category === 'films' ? 'video' : 'audio'),
@@ -1670,9 +2536,13 @@ Respond with strictly valid JSON in this exact structure:
     );
   });
 
-  // ---------------------------------------------------------------------------
-  // VITE DEV MIDDLEWARE OR PRODUCTION STATIC ASSETS
-  // ---------------------------------------------------------------------------
+  return { app, state, DATA_DIR, UPLOADS_DIR, IS_PRODUCTION, SANDBOX_PAYMENT_ALLOWED };
+}
+
+export async function startServer() {
+  const PORT = Number(process.env.PORT || 3000);
+  const { app } = createGoppoApp();
+
   const distPath = path.resolve(process.cwd(), 'dist');
   const isProd = process.env.NODE_ENV === 'production' && fs.existsSync(distPath);
 
@@ -1701,4 +2571,10 @@ Respond with strictly valid JSON in this exact structure:
   });
 }
 
-startServer();
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href &&
+  process.env.GOPPO_NO_AUTOSTART !== 'true'
+) {
+  void startServer();
+}

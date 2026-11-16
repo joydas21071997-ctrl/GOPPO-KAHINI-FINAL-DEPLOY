@@ -87,20 +87,101 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
       : track.episode?.id || `${track.story.id}_ep1`
     : '';
 
-  const audioSrc = track
-    ? (track.isTrailer ? track.story.trailerAudioUrl : track.episode?.audioUrl) ||
-      (track.isTrailer
-        ? `/api/audio/${track.story.id}/trailer/trailer.wav`
-        : `/api/audio/${track.story.id}/episode/${track.episode?.id}.wav${
-            authToken ? `?token=${encodeURIComponent(authToken)}` : ''
-          }`)
-    : '';
+  const [audioSrc, setAudioSrc] = useState<string>('');
+  const [activeVideoSrc, setActiveVideoSrc] = useState<string | undefined>(undefined);
 
-  const activeVideoSrc = track
-    ? track.isTrailer
-      ? track.story.trailerVideoUrl
-      : track.episode?.videoUrl
-    : undefined;
+  useEffect(() => {
+    let cancelled = false;
+    if (!track) {
+      setAudioSrc('');
+      setActiveVideoSrc(undefined);
+      return;
+    }
+
+    const resolveStreamUrls = async () => {
+      const isTrailer = track.isTrailer;
+      const isFree = !isPremiumStory(track.story);
+      const rawAudio = isTrailer ? track.story.trailerAudioUrl : track.episode?.audioUrl;
+      const rawVideo = isTrailer ? track.story.trailerVideoUrl : track.episode?.videoUrl;
+
+      const audioNeedsAuth =
+        !isTrailer &&
+        !isFree &&
+        (!rawAudio || (rawAudio.startsWith('/api/uploads/') && !rawAudio.includes('mt=')));
+
+      const videoNeedsAuth =
+        Boolean(rawVideo) &&
+        !isTrailer &&
+        !isFree &&
+        rawVideo!.startsWith('/api/uploads/') &&
+        !rawVideo!.includes('mt=');
+
+      let nextAudio =
+        rawAudio ||
+        (isTrailer
+          ? `/api/audio/${track.story.id}/trailer/trailer.wav`
+          : `/api/audio/${track.story.id}/episode/${track.episode?.id}.wav`);
+      let nextVideo = rawVideo;
+
+      if (audioNeedsAuth) {
+        try {
+          const res = await fetch('/api/media/authorize', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+            },
+            body: JSON.stringify({
+              storyId: track.story.id,
+              episodeId: track.episode?.id,
+              isTrailer: false,
+              mediaKind: 'audio',
+            }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.streamUrl) nextAudio = data.streamUrl;
+          }
+        } catch {
+          // Falls back to server-checked endpoint
+        }
+      }
+
+      if (videoNeedsAuth) {
+        try {
+          const res = await fetch('/api/media/authorize', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+            },
+            body: JSON.stringify({
+              storyId: track.story.id,
+              episodeId: track.episode?.id,
+              isTrailer: false,
+              mediaKind: 'video',
+            }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.streamUrl) nextVideo = data.streamUrl;
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
+
+      if (!cancelled) {
+        setAudioSrc(nextAudio);
+        setActiveVideoSrc(nextVideo);
+      }
+    };
+
+    void resolveStreamUrls();
+    return () => {
+      cancelled = true;
+    };
+  }, [trackId, track?.isTrailer, track?.episode?.audioUrl, track?.episode?.videoUrl, authToken]);
 
   useEffect(() => {
     const audio = audioRef.current;

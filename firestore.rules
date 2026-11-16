@@ -342,7 +342,8 @@ service cloud.firestore {
               'trailerAudioUrl', 'trailerVideoUrl', 'totalDurationLabel', 'ticketPriceInr',
               'accessPolicy', 'publicationStatus', 'isFeaturedHero', 'releaseYear',
               'collections', 'episodes', 'updatedAt'
-            ])
+            ]) &&
+            (!incoming().diff(existing()).affectedKeys().hasAny(['isFeaturedHero']) || hasEditorPermission('manage_hero'))
           )
         );
       allow delete: if isValidId(storyId) && (isAdmin() || hasEditorPermission('manage_stories'));

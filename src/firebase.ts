@@ -74,7 +74,11 @@ export async function uploadMediaFileToFirebaseStorage(
   file: File,
   folder: 'audio' | 'video' | 'artwork',
   onProgress?: (pct: number) => void,
+  accessTier: 'free' | 'premium' = 'free',
 ): Promise<{ url: string; storagePath: string }> {
+  if (accessTier === 'premium') {
+    throw new Error('PREMIUM_MEDIA_REQUIRES_BACKEND_STREAMING');
+  }
   if (!storage || !isFirebaseStorageConfigured) {
     throw new Error('FIREBASE_STORAGE_NOT_CONFIGURED');
   }
@@ -85,7 +89,8 @@ export async function uploadMediaFileToFirebaseStorage(
     .replace(/\.[^.]+$/, '')
     .replace(/[^a-zA-Z0-9_-]/g, '_')
     .slice(0, 60) || 'media';
-  const storagePath = `stories/${folder}/${baseName}_${Date.now()}.${ext}`;
+  const rand = Math.random().toString(36).slice(2, 8);
+  const storagePath = `stories/free/${folder}/${baseName}_${Date.now()}_${rand}.${ext}`;
   const storageRef = ref(storage, storagePath);
 
   return new Promise((resolve, reject) => {

@@ -1,18 +1,30 @@
-name: Build and Deploy Goppo Kahini
+name: Build, Security Verify, and Deploy Goppo Kahini
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      deploy_hosting:
+        description: 'Deploy built web app to Firebase Hosting'
+        type: boolean
+        default: true
+      deploy_rules:
+        description: 'Deploy Firestore & Storage Security Rules (requires environment approval)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
-jobs:
-  build_and_deploy:
-    runs-on: ubuntu-latest
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
 
+jobs:
+  validate_and_test:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -23,8 +35,38 @@ jobs:
       - name: Install Dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build Application
+      - name: TypeScript Lint Check
+        run: bun run lint
+
+      - name: Firebase Security Rules ESLint Validation
+        run: bunx eslint firestore.rules
+
+      - name: Run Backend & Media Security Verification Suite
+        run: bun run test:security
+
+      - name: Build Application & SEO Prerender
         run: bun run build
+
+      - name: Upload Built Hosting Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: goppo-kahini-dist
+          path: dist
+          retention-days: 3
+
+  deploy_hosting:
+    needs: validate_and_test
+    if: github.event_name == 'push' || inputs.deploy_hosting == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Built Hosting Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: goppo-kahini-dist
+          path: dist
 
       - name: Deploy to Firebase Hosting
         uses: FirebaseExtended/action-hosting-deploy@v0
@@ -33,3 +75,33 @@ jobs:
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_GOPPO_KAHINI }}
           channelId: live
           projectId: goppo-kahini
+
+  deploy_security_rules:
+    needs: validate_and_test
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_rules == true
+    runs-on: ubuntu-latest
+    environment: production-security-rules
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js for Firebase CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Deploy Firestore & Storage Security Rules
+        env:
+          GOOGLE_SA_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_GOPPO_KAHINI }}
+        run: |
+          if [ -z "$GOOGLE_SA_JSON" ]; then
+            echo "FIREBASE_SERVICE_ACCOUNT_GOPPO_KAHINI secret is not configured." >&2
+            exit 1
+          fi
+          SA_FILE="$(mktemp)"
+          trap 'rm -f "$SA_FILE"' EXIT
+          chmod 600 "$SA_FILE"
+          printf '%s' "$GOOGLE_SA_JSON" > "$SA_FILE"
+          export GOOGLE_APPLICATION_CREDENTIALS="$SA_FILE"
+          npx -y firebase-tools@13 deploy --only firestore:rules,storage --project goppo-kahini --non-interactive
+

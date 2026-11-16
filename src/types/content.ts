@@ -213,6 +213,7 @@ export interface BootstrapPayload {
   categories: CategoryConfig[];
   nPassMonthlyPriceInr: number;
   liveGatewayConnected: boolean;
+  sandboxModeEnabled?: boolean;
   user: UserProfile | null;
   orders: OrderRecord[];
   progress: PlaybackProgress[];

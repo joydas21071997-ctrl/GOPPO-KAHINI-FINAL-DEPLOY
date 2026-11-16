@@ -19,6 +19,7 @@ interface StoryDetailsViewProps {
   story: StoryItem;
   t: UIStrings;
   user: UserProfile | null;
+  authToken?: string | null;
   progress?: PlaybackProgress[];
   activeTrackId?: string;
   isPlaying: boolean;
@@ -35,6 +36,7 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
   story,
   t,
   user,
+  authToken,
   progress = [],
   activeTrackId,
   isPlaying,
@@ -52,6 +54,46 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
     episode?: Episode;
   } | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+
+  const openAuthorizedEpisodeVideo = async (ep: Episode) => {
+    const rawUrl = ep.videoUrl || '';
+    if (!rawUrl) return;
+    if (isFreeStory(story) || !rawUrl.startsWith('/api/uploads/') || rawUrl.includes('mt=')) {
+      setActiveVideoModal({
+        url: rawUrl,
+        title: `${story.title} — ${ep.title}`,
+        episode: ep,
+      });
+      return;
+    }
+    try {
+      const res = await fetch('/api/media/authorize', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          storyId: story.id,
+          episodeId: ep.id,
+          isTrailer: false,
+          mediaKind: 'video',
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.streamUrl) {
+        setActiveVideoModal({
+          url: data.streamUrl,
+          title: `${story.title} — ${ep.title}`,
+          episode: ep,
+        });
+        return;
+      }
+    } catch {
+      // Fallback below
+    }
+    onBuyTicket(story);
+  };
 
   const isFree = isFreeStory(story);
   const isPremium = isPremiumStory(story);
@@ -454,13 +496,7 @@ export const StoryDetailsView: React.FC<StoryDetailsViewProps> = ({
                       {ep.videoUrl && (
                         <button
                           type="button"
-                          onClick={() =>
-                            setActiveVideoModal({
-                              url: ep.videoUrl!,
-                              title: `${story.title} — ${ep.title}`,
-                              episode: ep,
-                            })
-                          }
+                          onClick={() => void openAuthorizedEpisodeVideo(ep)}
                           className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold shadow-md shadow-red-950/40 cursor-pointer"
                         >
                           <Video className="h-3.5 w-3.5" />

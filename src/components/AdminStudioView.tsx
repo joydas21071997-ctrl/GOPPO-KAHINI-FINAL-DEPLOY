@@ -279,6 +279,51 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     adminDocPresent: boolean;
   } | null>(null);
   const [rulesCopied, setRulesCopied] = useState(false);
+  const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
+
+  const resolveAdminPreviewUrl = (rawUrl?: string): string | undefined => {
+    if (!rawUrl) return undefined;
+    const clean = rawUrl.split('?')[0];
+    return previewUrls[clean] || rawUrl;
+  };
+
+  useEffect(() => {
+    if (!authToken) return;
+    const urlsToAuthorize = [
+      trailerAudioUrl,
+      trailerVideoUrl,
+      ...episodes.flatMap((ep) => [ep.audioUrl || '', ep.videoUrl || '']),
+    ]
+      .filter((u) => typeof u === 'string' && u.startsWith('/api/uploads/') && !u.includes('mt='))
+      .map((u) => u.split('?')[0]);
+
+    const missing = Array.from(new Set(urlsToAuthorize)).filter((u) => !previewUrls[u]);
+    if (missing.length === 0) return;
+
+    let cancelled = false;
+    for (const cleanUrl of missing) {
+      const fileName = cleanUrl.slice('/api/uploads/'.length);
+      if (!fileName) continue;
+      void fetch('/api/media/authorize', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ fileName }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!cancelled && data?.streamUrl) {
+            setPreviewUrls((prev) => ({ ...prev, [cleanUrl]: data.streamUrl }));
+          }
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken, trailerAudioUrl, trailerVideoUrl, episodes]);
 
   // Live Firebase Config Metadata
   const firebaseMeta = getFirebasePublicMeta();
@@ -1118,59 +1163,103 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     }
   };
 
-  // Upload Media Helper: Uploads directly to Firebase Storage Bucket when available, with server fallback
+  // Upload Media Helper: Free assets try Firebase Storage first; Premium assets & Editor fallbacks use hardened chunked backend storage
   const uploadMediaWithFirebaseFallback = async (
     file: File,
     folder: 'audio' | 'video' | 'artwork',
     mediaType: 'audio' | 'video' | 'image',
+    accessTier: 'free' | 'premium' = 'free',
   ): Promise<{ url: string; viaCloudBucket: boolean }> => {
-    if (isFirebaseStorageConfigured && auth?.currentUser) {
+    if (accessTier === 'free' && isFirebaseStorageConfigured && auth?.currentUser) {
       try {
         setUploadProgress(5);
-        const uploaded = await uploadMediaFileToFirebaseStorage(file, folder, (pct) =>
-          setUploadProgress(pct),
+        const uploaded = await uploadMediaFileToFirebaseStorage(
+          file,
+          folder,
+          (pct) => setUploadProgress(pct),
+          'free',
         );
         return { url: uploaded.url, viaCloudBucket: true };
       } catch {
-        // Bucket may not exist yet in Firebase Console; seamlessly fall back to server upload
+        // Bucket may not exist or editor lacks Firebase Storage custom claim; seamlessly use hardened server upload
       }
     }
 
-    const base64Data = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = () => reject(new Error('READ_FAILED'));
-      reader.readAsDataURL(file);
-    });
-
-    const res = await fetch('/api/admin/upload-media', {
+    setUploadProgress(2);
+    const initRes = await fetch('/api/admin/upload-media/init', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${authToken}`,
       },
       body: JSON.stringify({
-        fileData: base64Data,
         fileName: file.name,
+        fileSize: file.size,
         mediaType,
+        mimeType: file.type || '',
+        accessTier,
       }),
     });
-    const data = await res.json();
-    if (!res.ok || !data.url) {
-      throw new Error(data.error || 'Upload failed');
+    const initData = await initRes.json();
+    if (!initRes.ok || !initData.uploadId) {
+      throw new Error(initData.error || 'Upload initialization failed');
     }
-    return { url: data.url as string, viaCloudBucket: false };
+
+    const uploadId: string = initData.uploadId;
+    const chunkSize: number = Number(initData.chunkSize) || 4 * 1024 * 1024;
+    let offset = 0;
+
+    while (offset < file.size) {
+      const end = Math.min(file.size, offset + chunkSize);
+      const slice = file.slice(offset, end);
+      const chunkRes = await fetch(`/api/admin/upload-media/chunk/${encodeURIComponent(uploadId)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: slice,
+      });
+      if (!chunkRes.ok) {
+        const chunkErr = await chunkRes.json().catch(() => ({}));
+        throw new Error(chunkErr.error || 'Chunk upload failed');
+      }
+      offset = end;
+      setUploadProgress(Math.min(95, Math.max(5, Math.round((offset / Math.max(1, file.size)) * 95))));
+    }
+
+    const completeRes = await fetch(`/api/admin/upload-media/complete/${encodeURIComponent(uploadId)}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+      },
+    });
+    const completeData = await completeRes.json();
+    if (!completeRes.ok || !completeData.url) {
+      throw new Error(completeData.error || 'Upload finalization failed');
+    }
+    setUploadProgress(100);
+    if (completeData.previewUrl) {
+      setPreviewUrls((prev) => ({ ...prev, [completeData.url]: completeData.previewUrl }));
+    }
+    return { url: completeData.url as string, viaCloudBucket: false };
   };
 
   // Upload Audio File
   const handleAudioFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, target: 'trailer' | number) => {
     const file = e.target.files?.[0];
     if (!file || !authToken) return;
+    const accessTier: 'free' | 'premium' = target === 'trailer' ? 'free' : formPrice > 0 ? 'premium' : 'free';
     setBusy(true);
     setStatusBanner(`অডিও ফাইল "${file.name}" আপলোড হচ্ছে...`);
 
     try {
-      const { url, viaCloudBucket } = await uploadMediaWithFirebaseFallback(file, 'audio', 'audio');
+      const { url, viaCloudBucket } = await uploadMediaWithFirebaseFallback(
+        file,
+        'audio',
+        'audio',
+        accessTier,
+      );
       if (target === 'trailer') {
         setTrailerAudioUrl(url);
       } else {
@@ -1181,10 +1270,13 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       setStatusBanner(
         viaCloudBucket
           ? `অডিও ফাইল "${file.name}" Firebase Storage বাকেটে সফলভাবে আপলোড হয়েছে!`
-          : `অডিও ফাইল "${file.name}" সার্ভার স্টোরেজে সফলভাবে যুক্ত হয়েছে!`,
+          : accessTier === 'premium'
+            ? `প্রিমিয়াম অডিও ফাইল "${file.name}" সুরক্ষিত সার্ভার স্টোরেজে সংরক্ষিত হয়েছে!`
+            : `অডিও ফাইল "${file.name}" সার্ভার স্টোরেজে সফলভাবে যুক্ত হয়েছে!`,
       );
-    } catch {
-      setStatusBanner('অডিও ফাইল আপলোড করতে সমস্যা হয়েছে।');
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : '';
+      setStatusBanner(reason ? `অডিও আপলোড ব্যর্থ: ${reason}` : 'অডিও ফাইল আপলোড করতে সমস্যা হয়েছে।');
     } finally {
       setUploadProgress(null);
       setBusy(false);
@@ -1199,15 +1291,16 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     setStatusBanner(`পোস্টার "${file.name}" আপলোড হচ্ছে...`);
 
     try {
-      const { url, viaCloudBucket } = await uploadMediaWithFirebaseFallback(file, 'artwork', 'image');
+      const { url, viaCloudBucket } = await uploadMediaWithFirebaseFallback(file, 'artwork', 'image', 'free');
       setCustomArtworkUrl(url);
       setStatusBanner(
         viaCloudBucket
           ? 'কাস্টম পোস্টার Firebase Storage বাকেটে আপলোড সম্পন্ন হয়েছে!'
           : 'কাস্টম পোস্টার সার্ভার স্টোরেজে আপলোড সম্পন্ন হয়েছে!',
       );
-    } catch {
-      setStatusBanner('ছবি আপলোড করতে সমস্যা হয়েছে।');
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : '';
+      setStatusBanner(reason ? `ছবি আপলোড ব্যর্থ: ${reason}` : 'ছবি আপলোড করতে সমস্যা হয়েছে।');
     } finally {
       setUploadProgress(null);
       setBusy(false);
@@ -1218,11 +1311,17 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
   const handleVideoFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, target: 'trailer' | number) => {
     const file = e.target.files?.[0];
     if (!file || !authToken) return;
+    const accessTier: 'free' | 'premium' = target === 'trailer' ? 'free' : formPrice > 0 ? 'premium' : 'free';
     setBusy(true);
     setStatusBanner(`ভিডিও ফাইল "${file.name}" আপলোড হচ্ছে... অনুগ্রহ করে অপেক্ষা করুন।`);
 
     try {
-      const { url, viaCloudBucket } = await uploadMediaWithFirebaseFallback(file, 'video', 'video');
+      const { url, viaCloudBucket } = await uploadMediaWithFirebaseFallback(
+        file,
+        'video',
+        'video',
+        accessTier,
+      );
       if (target === 'trailer') {
         setTrailerVideoUrl(url);
       } else {
@@ -1235,10 +1334,13 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       setStatusBanner(
         viaCloudBucket
           ? `ভিডিও ফাইল "${file.name}" Firebase Storage বাকেটে সফলভাবে আপলোড হয়েছে!`
-          : `ভিডিও ফাইল "${file.name}" সার্ভার স্টোরেজে সফলভাবে যুক্ত হয়েছে!`,
+          : accessTier === 'premium'
+            ? `প্রিমিয়াম ভিডিও ফাইল "${file.name}" সুরক্ষিত সার্ভার স্টোরেজে সংরক্ষিত হয়েছে!`
+            : `ভিডিও ফাইল "${file.name}" সার্ভার স্টোরেজে সফলভাবে যুক্ত হয়েছে!`,
       );
-    } catch {
-      setStatusBanner('ভিডিও আপলোডে সমস্যা হয়েছে।');
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : '';
+      setStatusBanner(reason ? `ভিডিও আপলোড ব্যর্থ: ${reason}` : 'ভিডিও আপলোডে সমস্যা হয়েছে।');
     } finally {
       setUploadProgress(null);
       setBusy(false);
@@ -1264,6 +1366,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
         const audioUrl = URL.createObjectURL(audioBlob);
         setRecordedAudioUrl(audioUrl);
         setRecorderTarget(target);
+        const recTier: 'free' | 'premium' = target === 'trailer' ? 'free' : formPrice > 0 ? 'premium' : 'free';
 
         // Upload recorded blob to backend
         const reader = new FileReader();
@@ -1280,10 +1383,14 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                 fileData: base64Data,
                 fileName: `voice_record_${Date.now()}.webm`,
                 mediaType: 'audio',
+                accessTier: recTier,
               }),
             });
             const data = await res.json();
             if (res.ok && data.url) {
+              if (data.previewUrl) {
+                setPreviewUrls((prev) => ({ ...prev, [data.url]: data.previewUrl }));
+              }
               if (target === 'trailer') {
                 setTrailerAudioUrl(data.url);
               } else {
@@ -2268,7 +2375,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                   <video
                     controls
                     playsInline
-                    src={trailerVideoUrl}
+                    src={resolveAdminPreviewUrl(trailerVideoUrl)}
                     className="w-full max-h-56 rounded-lg bg-black border border-white/[0.06] object-contain"
                   />
                 </div>
@@ -2281,7 +2388,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                     <Volume2 className="h-4 w-4 text-red-400 shrink-0" />
                     <span className="font-mono text-red-300 truncate">{trailerAudioUrl}</span>
                   </div>
-                  <audio controls src={trailerAudioUrl} className="h-7 w-48 shrink-0" />
+                  <audio controls src={resolveAdminPreviewUrl(trailerAudioUrl)} className="h-7 w-48 shrink-0" />
                 </div>
               )}
             </div>
@@ -2501,7 +2608,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                             সরান
                           </button>
                         </div>
-                        <video controls playsInline src={ep.videoUrl} className="w-full max-h-44 rounded bg-black object-contain" />
+                        <video controls playsInline src={resolveAdminPreviewUrl(ep.videoUrl)} className="w-full max-h-44 rounded bg-black object-contain" />
                       </div>
                     )}
 
@@ -2511,7 +2618,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                           <Music className="h-4 w-4 text-red-400 shrink-0" />
                           <span className="font-mono text-red-300 truncate">{ep.audioUrl}</span>
                         </div>
-                        <audio controls src={ep.audioUrl} className="h-6 w-44 shrink-0" />
+                        <audio controls src={resolveAdminPreviewUrl(ep.audioUrl)} className="h-6 w-44 shrink-0" />
                       </div>
                     )}
                   </div>
@@ -3762,7 +3869,44 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
               <button
                 type="button"
                 onClick={async () => {
-                  const snippet = `rules_version = '2';\nservice firebase.storage {\n  match /b/{bucket}/o {\n    match /stories/{folder}/{fileName} {\n      allow read: if folder in ['audio', 'video', 'artwork'];\n      allow write: if request.auth != null && request.auth.token.email_verified == true && folder in ['audio', 'video', 'artwork'] && request.resource.size <= 150 * 1024 * 1024;\n    }\n    match /{allPaths=**} { allow read, write: if false; }\n  }\n}`;
+                  const snippet = `rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isVerifiedEmail() { return request.auth != null && request.auth.token.email_verified == true; }
+    function isOwnerOrAdmin() {
+      return isVerifiedEmail() && (
+        request.auth.token.email == 'joydas.21071997@gmail.com' ||
+        request.auth.token.role in ['owner', 'admin'] || request.auth.token.admin == true
+      );
+    }
+    function isAuthorizedMediaEditor() {
+      return isVerifiedEmail() && request.auth.token.role == 'editor' &&
+        (request.auth.token.manage_media == true || (request.auth.token.permissions is list && 'manage_media' in request.auth.token.permissions));
+    }
+    function isValidMedia(folder, fileName) {
+      return request.resource != null && request.resource.size > 0 && (
+        (folder == 'artwork' && fileName.matches('^.+\\\\.([jJ][pP][eE]?[gG]|[pP][nN][gG]|[wW][eE][bB][pP])$') && request.resource.size <= 10 * 1024 * 1024 && request.resource.contentType.matches('^image/(jpeg|png|webp)$')) ||
+        (folder == 'audio' && fileName.matches('^.+\\\\.([mM][pP]3|[wW][aA][vV]|[oO][gG][gG]|[mM]4[aA]|[wW][eE][bB][mM])$') && request.resource.size <= 150 * 1024 * 1024 && request.resource.contentType.matches('^audio/(mpeg|mp3|wav|x-wav|ogg|mp4|x-m4a|aac|webm)$')) ||
+        (folder == 'video' && fileName.matches('^.+\\\\.([mM][pP]4|[wW][eE][bB][mM]|[mM][oO][vV]|[mM][kK][vV])$') && request.resource.size <= 150 * 1024 * 1024 && request.resource.contentType.matches('^video/(mp4|webm|quicktime|x-matroska)$'))
+      );
+    }
+    match /stories/premium/{folder}/{fileName} {
+      allow read, update, delete: if isOwnerOrAdmin();
+      allow create: if (isOwnerOrAdmin() || isAuthorizedMediaEditor()) && folder in ['audio', 'video'] && isValidMedia(folder, fileName);
+    }
+    match /stories/free/{folder}/{fileName} {
+      allow read: if folder in ['audio', 'video', 'artwork'];
+      allow create: if (isOwnerOrAdmin() || isAuthorizedMediaEditor()) && folder in ['audio', 'video', 'artwork'] && isValidMedia(folder, fileName);
+      allow update, delete: if isOwnerOrAdmin();
+    }
+    match /stories/{folder}/{fileName} {
+      allow read: if folder in ['audio', 'video', 'artwork'];
+      allow create: if (isOwnerOrAdmin() || isAuthorizedMediaEditor()) && folder in ['audio', 'video', 'artwork'] && isValidMedia(folder, fileName);
+      allow update, delete: if isOwnerOrAdmin();
+    }
+    match /{allPaths=**} { allow read, write: if false; }
+  }
+}`;
                   await navigator.clipboard?.writeText(snippet).catch(() => {});
                   setRulesCopied(true);
                   setTimeout(() => setRulesCopied(false), 3000);
