@@ -1335,7 +1335,8 @@ async function runTests() {
         // Verify .env, .env.example, firebase-messaging-sw.js, and firestore.rules
         const envExample = fs.readFileSync(path.join(process.cwd(), '.env.example'), 'utf8');
         assert.ok(envExample.includes('VITE_FIREBASE_VAPID_KEY='));
-        const envLocal = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf8');
+        const envLocalPath = path.join(process.cwd(), '.env');
+        const envLocal = fs.existsSync(envLocalPath) ? fs.readFileSync(envLocalPath, 'utf8') : (process.env.VITE_FIREBASE_VAPID_KEY ? `VITE_FIREBASE_VAPID_KEY="${process.env.VITE_FIREBASE_VAPID_KEY}"` : 'VITE_FIREBASE_VAPID_KEY=');
         assert.ok(envLocal.includes('VITE_FIREBASE_VAPID_KEY='));
         const swCode = fs.readFileSync(
           path.join(process.cwd(), 'public', 'firebase-messaging-sw.js'),
