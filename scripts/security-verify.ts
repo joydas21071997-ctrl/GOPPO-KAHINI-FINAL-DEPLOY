@@ -9,6 +9,7 @@ import { createGoppoApp, type GoppoAppOptions } from '../server.ts';
 import { verifyFirebaseIdToken, type VerifiedFirebaseToken } from '../server/firebaseAuth.ts';
 
 process.env.GOPPO_NO_AUTOSTART = 'true';
+process.env.GOPPO_DISABLE_CLOUD_METADATA = 'true';
 process.env.OWNER_ADMIN_EMAILS =
   process.env.OWNER_ADMIN_EMAILS || 'joydas.21071997@gmail.com';
 
@@ -94,6 +95,7 @@ async function withServer(
   const { app } = createGoppoApp({
     dataDir: tempDir,
     skipCloudHydration: true,
+    disableLiveFirebaseAdmin: true,
     verifyTokenImpl: async (tok: string) => MOCK_TOKENS[tok] || null,
     ...opts,
   });
@@ -1346,6 +1348,94 @@ async function runTests() {
         record('16. Web Push FCM (VAPID env, token registration, Admin send to test account, stale pruning)');
       },
     );
+  }
+
+  // =========================================================================
+  // SUITE 17: Environment Auth Separation (CI/Local Mock Guard vs Cloud Run)
+  // =========================================================================
+  {
+    const prevKService = process.env.K_SERVICE;
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevNoAutostart = process.env.GOPPO_NO_AUTOSTART;
+    process.env.K_SERVICE = 'goppo-kahini-prod';
+    process.env.NODE_ENV = 'production';
+    delete process.env.GOPPO_NO_AUTOSTART;
+    try {
+      const prodTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'goppo-prod-guard-'));
+      try {
+        assert.throws(
+          () =>
+            createGoppoApp({
+              dataDir: prodTempDir,
+              skipCloudHydration: true,
+              verifyTokenImpl: async () => MOCK_TOKENS['tok.owner.jwt'],
+            }),
+          /SECURITY_VIOLATION/,
+        );
+        assert.throws(
+          () =>
+            createGoppoApp({
+              dataDir: prodTempDir,
+              skipCloudHydration: true,
+              disableLiveFirebaseAdmin: true,
+            }),
+          /SECURITY_VIOLATION/,
+        );
+        assert.throws(
+          () =>
+            createGoppoApp({
+              dataDir: prodTempDir,
+              skipCloudHydration: true,
+              messagingOverride: {
+                async sendEachForMulticast() {
+                  return { successCount: 0, failureCount: 0, responses: [] };
+                },
+              },
+            }),
+          /SECURITY_VIOLATION/,
+        );
+      } finally {
+        fs.rmSync(prodTempDir, { recursive: true, force: true });
+      }
+    } finally {
+      if (prevKService === undefined) delete process.env.K_SERVICE;
+      else process.env.K_SERVICE = prevKService;
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+      if (prevNoAutostart === undefined) delete process.env.GOPPO_NO_AUTOSTART;
+      else process.env.GOPPO_NO_AUTOSTART = prevNoAutostart;
+    }
+
+    // Verify production-configured server WITHOUT verifyTokenImpl rejects mock bearer tokens
+    const realAuthTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'goppo-prod-nomock-'));
+    const { app: realAuthApp } = createGoppoApp({
+      dataDir: realAuthTempDir,
+      isProductionOverride: true,
+      allowSandboxOverride: false,
+      skipCloudHydration: true,
+    });
+    const realAuthServer = http.createServer(realAuthApp);
+    await new Promise<void>((resolve) => realAuthServer.listen(0, '127.0.0.1', resolve));
+    const { port } = realAuthServer.address() as AddressInfo;
+    try {
+      const mockJwtAttempt = await fetch(`http://127.0.0.1:${port}/api/auth/firebase`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tok.owner.jwt' },
+      });
+      assert.equal(mockJwtAttempt.status, 401);
+
+      const mockAdminAttempt = await fetch(`http://127.0.0.1:${port}/api/admin/export`, {
+        headers: { Authorization: 'Bearer tok.owner.jwt' },
+      });
+      assert.equal(mockAdminAttempt.status, 403);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        realAuthServer.close((err) => (err ? reject(err) : resolve())),
+      );
+      fs.rmSync(realAuthTempDir, { recursive: true, force: true });
+    }
+
+    record('17. Environment isolation (Cloud Run forbids mocks; prod rejects forged tokens; CI runs ADC-free)');
   }
 
   for (const line of results) {

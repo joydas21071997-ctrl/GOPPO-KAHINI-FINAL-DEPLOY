@@ -117,10 +117,23 @@ export interface GoppoAppOptions {
   };
   skipCloudHydration?: boolean;
   messagingOverride?: MessagingAdapter;
+  disableLiveFirebaseAdmin?: boolean;
 }
 
 export function createGoppoApp(options: GoppoAppOptions = {}) {
   const IS_CLOUD_RUN = Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
+  const IS_TEST_HARNESS =
+    process.env.GOPPO_NO_AUTOSTART === 'true' || process.env.NODE_ENV === 'test';
+  const HAS_TEST_OVERRIDES = Boolean(
+    options.verifyTokenImpl ||
+      options.messagingOverride ||
+      options.disableLiveFirebaseAdmin,
+  );
+  if (IS_CLOUD_RUN && process.env.NODE_ENV === 'production' && !IS_TEST_HARNESS && HAS_TEST_OVERRIDES) {
+    throw new Error(
+      'SECURITY_VIOLATION: Mock authentication or Firebase Admin overrides are strictly forbidden in Cloud Run production.',
+    );
+  }
   const IS_PRODUCTION =
     typeof options.isProductionOverride === 'boolean'
       ? options.isProductionOverride
@@ -427,9 +440,10 @@ async function resolveFirebaseUserProfile(
   let resolvedPermissions: AdminPermission[] | undefined = undefined;
 
   const isOwnerByEnv = isEnvProvisionedOwner(verified);
-  const firestoreAdminDoc = verified.emailVerified
-    ? await checkFirestoreRoleDoc(token, 'admins', verified.uid)
-    : null;
+  const firestoreAdminDoc =
+    verified.emailVerified && !options.disableLiveFirebaseAdmin
+      ? await checkFirestoreRoleDoc(token, 'admins', verified.uid)
+      : null;
   const isOwnerByExistingRecord =
     verified.emailVerified && existing?.role === 'admin';
 
@@ -438,7 +452,9 @@ async function resolveFirebaseUserProfile(
     resolvedPermissions = [...ALL_ADMIN_PERMISSIONS];
   } else if (verified.emailVerified) {
     // Check Editor grants (Firestore /editors/{uid} or server-stored state.editors)
-    const firestoreEditorDoc = await checkFirestoreRoleDoc(token, 'editors', verified.uid);
+    const firestoreEditorDoc = !options.disableLiveFirebaseAdmin
+      ? await checkFirestoreRoleDoc(token, 'editors', verified.uid)
+      : null;
     const localEditorGrant =
       (verified.email && state.editors?.[verified.email.toLowerCase()]) ||
       Object.values(state.editors || {}).find((ed) => ed.uid === verified.uid);
@@ -763,6 +779,7 @@ function isUploadFilePubliclyAccessible(fileName: string): {
       return matchedUser?.firebaseUid || matchedUser?.id || null;
     },
     messagingOverride: options.messagingOverride,
+    disableLiveFirebaseAdmin: options.disableLiveFirebaseAdmin,
   });
 
   const app = express();

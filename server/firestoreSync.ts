@@ -27,6 +27,13 @@ let cachedMetadataToken: { token: string; expiresAt: number } | null = null;
 let metadataUnavailableUntil = 0;
 
 export async function getCloudMetadataAccessToken(): Promise<string | null> {
+  if (
+    process.env.GOPPO_DISABLE_CLOUD_METADATA === 'true' ||
+    process.env.NODE_ENV === 'test'
+  ) {
+    return null;
+  }
+
   const now = Date.now();
   if (cachedMetadataToken && cachedMetadataToken.expiresAt > now + 30_000) {
     return cachedMetadataToken.token;

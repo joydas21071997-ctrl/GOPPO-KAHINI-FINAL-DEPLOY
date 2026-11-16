@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { applicationDefault, getApps, initializeApp, type App as AdminApp } from 'firebase-admin/app';
 import { FieldValue, getFirestore, type Firestore as AdminFirestore } from 'firebase-admin/firestore';
 import {
@@ -7,6 +10,7 @@ import {
   type MulticastMessage,
 } from 'firebase-admin/messaging';
 import { getFirebaseRuntimeConfig } from './firebaseAuth.ts';
+import { getCloudMetadataAccessToken } from './firestoreSync.ts';
 import type { Language } from '../src/types/content.ts';
 
 export interface StoredFcmTokenRecord {
@@ -64,6 +68,38 @@ const ADMIN_APP_NAME = 'goppo-kahini-fcm-admin';
 let cachedAdminApp: AdminApp | null = null;
 let adminInitError: string | null = null;
 
+async function hasAvailableGoogleAdc(disableLiveFirebaseAdmin?: boolean): Promise<boolean> {
+  if (disableLiveFirebaseAdmin) {
+    return false;
+  }
+  const isCloudRun = Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
+
+  const credPath = (process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
+  if (credPath) {
+    try {
+      if (fs.existsSync(credPath)) return true;
+    } catch {
+      // Ignore invalid path
+    }
+  }
+
+  const wellKnownAdc = process.env.APPDATA
+    ? path.join(process.env.APPDATA, 'gcloud', 'application_default_credentials.json')
+    : path.join(os.homedir(), '.config', 'gcloud', 'application_default_credentials.json');
+  try {
+    if (fs.existsSync(wellKnownAdc)) return true;
+  } catch {
+    // Ignore
+  }
+
+  if (isCloudRun) {
+    return true;
+  }
+
+  const metaToken = await getCloudMetadataAccessToken().catch(() => null);
+  return Boolean(metaToken);
+}
+
 function getOrInitAdminApp(): AdminApp | null {
   if (cachedAdminApp) return cachedAdminApp;
   const existing = getApps().find((a) => a.name === ADMIN_APP_NAME);
@@ -94,7 +130,10 @@ function getOrInitAdminApp(): AdminApp | null {
   }
 }
 
-function getAdminFirestore(): AdminFirestore | null {
+async function getAdminFirestore(disableLiveFirebaseAdmin?: boolean): Promise<AdminFirestore | null> {
+  if (!(await hasAvailableGoogleAdc(disableLiveFirebaseAdmin))) {
+    return null;
+  }
   const adminApp = getOrInitAdminApp();
   if (!adminApp) return null;
   const { databaseId } = getFirebaseRuntimeConfig();
@@ -108,7 +147,12 @@ function getAdminFirestore(): AdminFirestore | null {
   }
 }
 
-function getAdminMessaging(): Messaging | null {
+async function getAdminMessaging(disableLiveFirebaseAdmin?: boolean): Promise<Messaging | null> {
+  if (!(await hasAvailableGoogleAdc(disableLiveFirebaseAdmin))) {
+    adminInitError =
+      'Google Application Default Credentials (Cloud Run Service Account or GOOGLE_APPLICATION_CREDENTIALS) unavailable.';
+    return null;
+  }
   const adminApp = getOrInitAdminApp();
   if (!adminApp) return null;
   try {
@@ -157,6 +201,7 @@ export function createFcmNotificationService(options: {
   saveLocalState: () => void;
   findUidByEmail: (email: string) => Promise<string | null>;
   messagingOverride?: MessagingAdapter;
+  disableLiveFirebaseAdmin?: boolean;
 }) {
   const upsertLocalToken = (record: StoredFcmTokenRecord) => {
     const list = options.localTokensByUser[record.uid] || [];
@@ -212,7 +257,7 @@ export function createFcmNotificationService(options: {
     upsertLocalToken(record);
 
     let firestoreSynced = false;
-    const adminDb = getAdminFirestore();
+    const adminDb = await getAdminFirestore(options.disableLiveFirebaseAdmin);
     if (adminDb) {
       try {
         const docRef = adminDb.collection('users').doc(uid).collection('fcmTokens').doc(tokenId);
@@ -243,7 +288,7 @@ export function createFcmNotificationService(options: {
     const tokenId = computeServerFcmTokenId(cleanToken);
     removeLocalTokenByValue(cleanToken, uid);
 
-    const adminDb = getAdminFirestore();
+    const adminDb = await getAdminFirestore(options.disableLiveFirebaseAdmin);
     if (adminDb) {
       try {
         await adminDb.collection('users').doc(uid).collection('fcmTokens').doc(tokenId).delete();
@@ -259,7 +304,7 @@ export function createFcmNotificationService(options: {
       byToken.set(rec.token, rec);
     }
 
-    const adminDb = getAdminFirestore();
+    const adminDb = await getAdminFirestore(options.disableLiveFirebaseAdmin);
     if (adminDb) {
       try {
         const snap = await adminDb.collection('users').doc(uid).collection('fcmTokens').get();
@@ -293,7 +338,7 @@ export function createFcmNotificationService(options: {
       }
     }
 
-    const adminDb = getAdminFirestore();
+    const adminDb = await getAdminFirestore(options.disableLiveFirebaseAdmin);
     if (adminDb) {
       try {
         const snap = await adminDb.collectionGroup('fcmTokens').get();
@@ -384,7 +429,10 @@ export function createFcmNotificationService(options: {
         sentCount: 0,
         failureCount: 0,
         removedInvalidTokens: 0,
-        usedLiveAdminSdk: Boolean(options.messagingOverride || getAdminMessaging()),
+        usedLiveAdminSdk:
+          !options.messagingOverride &&
+          !options.disableLiveFirebaseAdmin &&
+          Boolean(await getAdminMessaging(options.disableLiveFirebaseAdmin)),
         warnings: [
           ...warnings,
           'No registered FCM device tokens found for the selected target.',
@@ -393,10 +441,11 @@ export function createFcmNotificationService(options: {
       };
     }
 
-    const messaging = options.messagingOverride || getAdminMessaging();
+    const messaging =
+      options.messagingOverride || (await getAdminMessaging(options.disableLiveFirebaseAdmin));
     if (!messaging) {
       throw new Error(
-        `Firebase Admin Messaging is not initialized (${adminInitError || 'Application Default Credentials unavailable in local sandbox'}).`,
+        `Firebase Admin Messaging is not initialized (${adminInitError || 'Application Default Credentials unavailable'}).`,
       );
     }
 
