@@ -15,6 +15,15 @@ import {
   type FirebaseStorage,
 } from 'firebase/storage';
 
+import {
+  getMessaging,
+  getToken,
+  isSupported as isMessagingSupported,
+  onMessage,
+  type Messaging,
+  type MessagePayload,
+} from 'firebase/messaging';
+
 interface FirebaseClientConfig {
   projectId?: string;
   appId?: string;
@@ -23,6 +32,7 @@ interface FirebaseClientConfig {
   firestoreDatabaseId?: string;
   storageBucket?: string;
   messagingSenderId?: string;
+  vapidKey?: string;
 }
 
 const configModules = import.meta.glob('../firebase-applet-config.json', {
@@ -66,17 +76,140 @@ export const isFirebaseStorageConfigured = Boolean(
   isFirebaseConfigured && firebaseConfig.storageBucket && storage,
 );
 
+export const FIREBASE_VAPID_KEY = (
+  import.meta.env.VITE_FIREBASE_VAPID_KEY ||
+  firebaseConfig.vapidKey ||
+  ''
+).trim();
+
 export { app, db, auth, storage, googleProvider };
 
 export function getFirebasePublicMeta() {
   return {
     configured: isFirebaseConfigured,
     storageConfigured: isFirebaseStorageConfigured,
+    vapidConfigured: Boolean(FIREBASE_VAPID_KEY),
     projectId: firebaseConfig.projectId || '',
     databaseId: firebaseConfig.firestoreDatabaseId || '',
     authDomain: firebaseConfig.authDomain || '',
     storageBucket: firebaseConfig.storageBucket || '',
   };
+}
+
+let cachedMessaging: Messaging | null = null;
+let cachedMessagingSwReg: ServiceWorkerRegistration | null = null;
+
+async function getFcmServiceWorkerRegistration(): Promise<ServiceWorkerRegistration | null> {
+  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+    return null;
+  }
+  if (cachedMessagingSwReg) {
+    return cachedMessagingSwReg;
+  }
+  const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
+    scope: '/firebase-cloud-messaging-push-scope',
+  });
+  if (registration.installing) {
+    await new Promise<void>((resolve) => {
+      const worker = registration.installing;
+      if (!worker) {
+        resolve();
+        return;
+      }
+      worker.addEventListener('statechange', () => {
+        if (worker.state === 'activated' || worker.state === 'redundant') {
+          resolve();
+        }
+      });
+      setTimeout(resolve, 2500);
+    });
+  }
+  cachedMessagingSwReg = registration;
+  return registration;
+}
+
+export async function getFcmMessagingInstance(): Promise<Messaging | null> {
+  if (typeof window === 'undefined' || !isFirebaseConfigured || !app) {
+    return null;
+  }
+  if (cachedMessaging) return cachedMessaging;
+  const supported = await isMessagingSupported().catch(() => false);
+  if (!supported) return null;
+  cachedMessaging = getMessaging(app);
+  return cachedMessaging;
+}
+
+export async function getExistingFcmTokenIfGranted(): Promise<string | null> {
+  if (
+    typeof window === 'undefined' ||
+    !('Notification' in window) ||
+    Notification.permission !== 'granted' ||
+    !FIREBASE_VAPID_KEY
+  ) {
+    return null;
+  }
+  const messaging = await getFcmMessagingInstance();
+  if (!messaging) return null;
+  const serviceWorkerRegistration = await getFcmServiceWorkerRegistration().catch(() => null);
+  try {
+    const token = await getToken(messaging, {
+      vapidKey: FIREBASE_VAPID_KEY,
+      ...(serviceWorkerRegistration ? { serviceWorkerRegistration } : {}),
+    });
+    return token || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function requestAndGenerateFcmToken(): Promise<{
+  token: string | null;
+  permission: NotificationPermission;
+  error?: string;
+}> {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return { token: null, permission: 'denied', error: 'BROWSER_NOTIFICATIONS_UNSUPPORTED' };
+  }
+
+  let permission = Notification.permission;
+  if (permission === 'default') {
+    permission = await Notification.requestPermission();
+  }
+  if (permission !== 'granted') {
+    return { token: null, permission, error: 'NOTIFICATION_PERMISSION_DENIED' };
+  }
+
+  if (!FIREBASE_VAPID_KEY) {
+    return { token: null, permission, error: 'VAPID_KEY_NOT_CONFIGURED' };
+  }
+
+  const messaging = await getFcmMessagingInstance();
+  if (!messaging) {
+    return { token: null, permission, error: 'FCM_UNSUPPORTED_IN_BROWSER' };
+  }
+
+  try {
+    const serviceWorkerRegistration = await getFcmServiceWorkerRegistration();
+    const token = await getToken(messaging, {
+      vapidKey: FIREBASE_VAPID_KEY,
+      ...(serviceWorkerRegistration ? { serviceWorkerRegistration } : {}),
+    });
+    if (!token) {
+      return { token: null, permission, error: 'FCM_TOKEN_EMPTY' };
+    }
+    return { token, permission };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { token: null, permission, error: msg || 'FCM_TOKEN_GENERATION_FAILED' };
+  }
+}
+
+export async function subscribeForegroundPushMessages(
+  handler: (payload: MessagePayload) => void,
+): Promise<() => void> {
+  const messaging = await getFcmMessagingInstance();
+  if (!messaging) return () => {};
+  return onMessage(messaging, handler);
 }
 
 export async function uploadMediaFileToFirebaseStorage(

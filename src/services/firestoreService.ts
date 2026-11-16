@@ -466,6 +466,90 @@ export async function syncPlaybackProgressToFirestore(
   }
 }
 
+export async function computeFcmTokenDocId(token: string): Promise<string> {
+  const normalized = token.trim();
+  if (typeof window !== 'undefined' && window.crypto?.subtle) {
+    try {
+      const digest = await window.crypto.subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(normalized),
+      );
+      const hex = Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+      return `fcm_${hex.slice(0, 40)}`;
+    } catch {
+      // Fallback hash below
+    }
+  }
+  let hash = 2166136261;
+  for (let i = 0; i < normalized.length; i += 1) {
+    hash ^= normalized.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `fcm_${(hash >>> 0).toString(16)}_${normalized.length}`;
+}
+
+export async function saveFcmTokenToFirestore(
+  uid: string,
+  token: string,
+  language: Language = 'bn',
+): Promise<string | null> {
+  const cleanToken = (token || '').trim();
+  if (
+    !isFirebaseConfigured ||
+    !db ||
+    !auth?.currentUser ||
+    auth.currentUser.uid !== uid ||
+    !auth.currentUser.emailVerified ||
+    !VALID_ID_REGEX.test(uid) ||
+    cleanToken.length < 10 ||
+    cleanToken.length > 512
+  ) {
+    return null;
+  }
+
+  const tokenId = await computeFcmTokenDocId(cleanToken);
+  const tokenRef = doc(db, 'users', uid, 'fcmTokens', tokenId);
+  const path = `users/${uid}/fcmTokens/${tokenId}`;
+  const ua = typeof navigator !== 'undefined' ? (navigator.userAgent || '').slice(0, 300) : '';
+
+  try {
+    const existing = await getDoc(tokenRef).catch(() => null);
+    const createdAtValue =
+      existing && existing.exists() && existing.data()?.createdAt
+        ? existing.data().createdAt
+        : serverTimestamp();
+
+    await setDoc(tokenRef, {
+      uid,
+      token: cleanToken,
+      platform: 'web',
+      language: language === 'hi' ? 'hi' : 'bn',
+      ...(ua ? { userAgent: ua } : {}),
+      createdAt: createdAtValue,
+      updatedAt: serverTimestamp(),
+    });
+    return tokenId;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function deleteFcmTokenFromFirestore(uid: string, token: string): Promise<void> {
+  const cleanToken = (token || '').trim();
+  if (!isFirebaseConfigured || !db || !auth?.currentUser || !VALID_ID_REGEX.test(uid) || !cleanToken) {
+    return;
+  }
+  const tokenId = await computeFcmTokenDocId(cleanToken);
+  const path = `users/${uid}/fcmTokens/${tokenId}`;
+  try {
+    await deleteDoc(doc(db, 'users', uid, 'fcmTokens', tokenId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
 function buildStoryFirestorePayload(story: StoryItem) {
   const storyId = sanitizeId(story.id);
   const payload: Record<string, unknown> = {

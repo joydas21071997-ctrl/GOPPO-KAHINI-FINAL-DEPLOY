@@ -86,6 +86,7 @@ service cloud.firestore {
         data.keys().hasOnly(['uid', 'email', 'updatedAt']) &&
         data.uid == userId &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        (isAdmin() || (request.auth.token.email is string && data.email == request.auth.token.email)) &&
         data.updatedAt == request.time;
     }
 
@@ -112,6 +113,18 @@ service cloud.firestore {
         data.updatedAt == request.time;
     }
 
+    function isValidUserFcmToken(data, userId) {
+      return data.keys().hasAll(['uid', 'token', 'platform', 'language', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'token', 'platform', 'language', 'userAgent', 'createdAt', 'updatedAt']) &&
+        data.uid == userId &&
+        data.token is string && data.token.size() >= 10 && data.token.size() <= 512 &&
+        data.platform in ['web', 'android', 'ios'] &&
+        data.language in ['bn', 'hi'] &&
+        (!('userAgent' in data) || (data.userAgent is string && data.userAgent.size() <= 300)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     function isValidStoryCatalogItem(data, storyId) {
       return data.keys().hasAll(['id', 'language', 'category', 'title', 'genre', 'coverArt', 'heroArt', 'ticketPriceInr', 'accessPolicy', 'publicationStatus', 'episodes', 'updatedAt']) &&
         data.keys().hasOnly([
@@ -133,6 +146,7 @@ service cloud.firestore {
         data.accessPolicy in ['ticket_only', 'npass_included', 'both'] &&
         data.publicationStatus in ['published', 'draft'] &&
         data.episodes is list && data.episodes.size() <= 100 &&
+        (data.episodes.size() == 0 || (data.episodes[0] is map && data.episodes[0].keys().hasAll(['id', 'title']))) &&
         data.updatedAt == request.time &&
         (!('mediaType' in data) || data.mediaType in ['audio', 'video']) &&
         (!('subtitle' in data) || (data.subtitle is string && data.subtitle.size() <= 300)) &&
@@ -148,7 +162,7 @@ service cloud.firestore {
         (!('totalDurationLabel' in data) || (data.totalDurationLabel is string && data.totalDurationLabel.size() >= 1 && data.totalDurationLabel.size() <= 30)) &&
         (!('isFeaturedHero' in data) || data.isFeaturedHero is bool) &&
         (!('releaseYear' in data) || (data.releaseYear is number && data.releaseYear >= 1900 && data.releaseYear <= 2100)) &&
-        (!('collections' in data) || (data.collections is list && data.collections.size() <= 10));
+        (!('collections' in data) || (data.collections is list && data.collections.size() <= 10 && (data.collections.size() == 0 || data.collections[0] is string)));
     }
 
     function isValidCategorySetting(data, categoryId) {
@@ -282,17 +296,17 @@ service cloud.firestore {
       allow delete: if isValidId(userId) && isAdmin();
 
       match /private/{docId} {
-        allow get: if isValidId(userId) && isValidId(docId) && (isOwner(userId) || isAdmin());
+        allow get: if isValidId(userId) && docId == 'info' && (isOwner(userId) || isAdmin());
         allow list: if isValidId(userId) && (isOwner(userId) || isAdmin());
-        allow create: if isValidId(userId) && isValidId(docId) && isVerifiedUser() && isOwner(userId) &&
+        allow create: if isValidId(userId) && docId == 'info' && isVerifiedUser() && isOwner(userId) &&
           isValidUserPrivateInfo(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(docId) && isVerifiedUser() &&
+        allow update: if isValidId(userId) && docId == 'info' && isVerifiedUser() &&
           isValidUserPrivateInfo(incoming(), userId) &&
           incoming().uid == existing().uid && (
             isAdmin() ||
             (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']))
           );
-        allow delete: if isValidId(userId) && isValidId(docId) && isAdmin();
+        allow delete: if isValidId(userId) && docId == 'info' && isAdmin();
       }
 
       // Server-authoritative 2-listen entitlements: client can read own entitlements; only server/Admin writes
@@ -319,16 +333,37 @@ service cloud.firestore {
             isAdmin() ||
             (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['isTrailer', 'positionSeconds', 'durationSeconds', 'updatedAt']))
           );
-        allow delete: if isValidId(userId) && isValidId(progressId) && (isOwner(userId) || isAdmin());
+        allow delete: if isValidId(userId) && isValidId(progressId) && (isAdmin() || (isVerifiedUser() && isOwner(userId)));
+      }
+
+      // Web Push FCM registration tokens: owner and admin can read/manage own device tokens
+      match /fcmTokens/{tokenId} {
+        allow get: if isValidId(userId) && isValidId(tokenId) && (isOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow create: if isValidId(userId) && isValidId(tokenId) && isVerifiedUser() &&
+          (isOwner(userId) || isAdmin()) &&
+          isValidUserFcmToken(incoming(), userId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isValidId(userId) && isValidId(tokenId) && isVerifiedUser() &&
+          isValidUserFcmToken(incoming(), userId) &&
+          incoming().uid == existing().uid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            isAdmin() ||
+            (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['token', 'platform', 'language', 'userAgent', 'updatedAt']))
+          );
+        allow delete: if isValidId(userId) && isValidId(tokenId) && (isAdmin() || (isVerifiedUser() && isOwner(userId)));
       }
     }
 
     // Story Catalog (Published items readable by all; drafts & mutations restricted to Admin / manage_stories Editor)
     match /stories/{storyId} {
       allow get: if isValidId(storyId) && (existing().publicationStatus == 'published' || isAdmin() || hasEditorPermission('manage_stories'));
-      allow list: if resource.data.publicationStatus == 'published' || isAdmin();
+      allow list: if resource.data.publicationStatus == 'published' || isAdmin() || hasEditorPermission('manage_stories');
       allow create: if isValidId(storyId) && (isAdmin() || hasEditorPermission('manage_stories')) &&
-        isValidStoryCatalogItem(incoming(), storyId);
+        isValidStoryCatalogItem(incoming(), storyId) &&
+        (!('isFeaturedHero' in incoming()) || incoming().isFeaturedHero == false || isAdmin() || hasEditorPermission('manage_hero'));
       allow update: if isValidId(storyId) &&
         isValidStoryCatalogItem(incoming(), storyId) &&
         incoming().id == existing().id && (
@@ -346,7 +381,7 @@ service cloud.firestore {
             (!incoming().diff(existing()).affectedKeys().hasAny(['isFeaturedHero']) || hasEditorPermission('manage_hero'))
           )
         );
-      allow delete: if isValidId(storyId) && (isAdmin() || hasEditorPermission('manage_stories'));
+      allow delete: if isValidId(storyId) && (isAdmin() || (hasEditorPermission('manage_stories') && existing().publicationStatus == 'draft'));
     }
 
     // Category Visibility Settings

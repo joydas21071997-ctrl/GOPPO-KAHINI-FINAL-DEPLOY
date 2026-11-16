@@ -25,9 +25,18 @@ concurrency:
 jobs:
   validate_and_test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Verify No Secrets or Runtime State Are Tracked
+        run: |
+          if git ls-files | grep -E '(\.env($|\.)|service[-_]?account.*\.json$|firebase-adminsdk-.*\.json$|\.goppo-data/|\.(pem|key)$)' | grep -v '^\.env\.example$'; then
+            echo "Sensitive file or secret tracked in git repository!" >&2
+            exit 1
+          fi
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -58,6 +67,11 @@ jobs:
     needs: validate_and_test
     if: github.event_name == 'push' || inputs.deploy_hosting == true
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment:
+      name: production-hosting
+      url: https://goppokahini.in
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -80,6 +94,8 @@ jobs:
     needs: validate_and_test
     if: github.event_name == 'workflow_dispatch' && inputs.deploy_rules == true
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     environment: production-security-rules
     steps:
       - name: Checkout Repository

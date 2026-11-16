@@ -36,6 +36,7 @@ import {
   Smartphone,
   Send,
   Eye,
+  Bell,
 } from 'lucide-react';
 import {
   sendPasswordResetEmail,
@@ -51,6 +52,7 @@ import {
   googleProvider,
   isFirebaseConfigured,
   isFirebaseStorageConfigured,
+  requestAndGenerateFcmToken,
   uploadMediaFileToFirebaseStorage,
 } from '../firebase';
 import { collection, getDocs, doc, getDoc } from 'firebase/firestore';
@@ -66,6 +68,7 @@ import {
   isEmbeddedIframe,
   publishAdSettingsToFirestore,
   saveAdDraftToFirestore,
+  saveFcmTokenToFirestore,
   syncCategoryToFirestore,
   syncEditorToFirestore,
   syncFullCatalogToFirestore,
@@ -286,6 +289,15 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
   } | null>(null);
   const [rulesCopied, setRulesCopied] = useState(false);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
+  const [pushTitle, setPushTitle] = useState('নতুন গল্প প্রকাশিত হয়েছে — Goppo Kahini');
+  const [pushBody, setPushBody] = useState('আমাদের নতুন অডিও গল্পটি এখনই শুনুন।');
+  const [pushTargetEmail, setPushTargetEmail] = useState('');
+  const [pushTargetUid, setPushTargetUid] = useState('');
+  const [pushLink, setPushLink] = useState('/');
+  const [pushTokenSummary, setPushTokenSummary] = useState<
+    Array<{ uid: string; tokenId: string; tokenPreview: string; platform: string; updatedAt: string }>
+  >([]);
+  const [pushDispatchResult, setPushDispatchResult] = useState<string | null>(null);
 
   const resolveAdminPreviewUrl = (rawUrl?: string): string | undefined => {
     if (!rawUrl) return undefined;
@@ -296,6 +308,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
   useEffect(() => {
     if (!authToken) return;
     const urlsToAuthorize = [
+      customArtworkUrl || '',
       trailerAudioUrl,
       trailerVideoUrl,
       ...episodes.flatMap((ep) => [ep.audioUrl || '', ep.videoUrl || '']),
@@ -329,7 +342,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [authToken, trailerAudioUrl, trailerVideoUrl, episodes]);
+  }, [authToken, customArtworkUrl, trailerAudioUrl, trailerVideoUrl, episodes]);
 
   // Live Firebase Config Metadata
   const firebaseMeta = getFirebasePublicMeta();
@@ -1881,14 +1894,16 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                           <span>এডিট</span>
                         </button>
 
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteStory(story.id)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-xs font-semibold text-red-400 hover:text-red-300 border border-red-500/20 cursor-pointer ml-auto"
-                          title="মুছে ফেলুন"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
+                        {(isOwnerAdmin || story.publicationStatus === 'draft') && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteStory(story.id)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-xs font-semibold text-red-400 hover:text-red-300 border border-red-500/20 cursor-pointer ml-auto"
+                            title="মুছে ফেলুন"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        )}
                       </>
                     )}
                   </div>
@@ -2278,7 +2293,11 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                 <div className="flex items-center gap-3">
                   <div className="h-14 w-12 rounded-lg overflow-hidden border border-white/[0.08] bg-[#0A090C] shrink-0">
                     <ArtworkImage
-                      srcKeyOrUrl={customArtworkUrl || formCoverArt}
+                      srcKeyOrUrl={
+                        resolveAdminPreviewUrl(customArtworkUrl || formCoverArt) ||
+                        customArtworkUrl ||
+                        formCoverArt
+                      }
                       alt="Preview"
                       className="h-full w-full object-cover"
                     />
@@ -3871,6 +3890,201 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                     {firestoreDiag.adminDocPresent ? 'Verified' : 'Bootstrapped'}
                   </span>
                 </div>
+              </div>
+            )}
+          </div>
+
+          {/* Web Push Notifications (FCM + Cloud Run Firebase Admin SDK) */}
+          <div className="p-5 rounded-xl bg-white/[0.02] border border-white/[0.06] space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="font-editorial text-sm font-bold text-[#F5F2EB] flex items-center gap-2">
+                  <Bell className="h-4 w-4 text-[#EF4444]" />
+                  Web Push নোটিফিকেশন (FCM + Firebase Admin SDK)
+                </h3>
+                <p className="text-xs text-[#A69E95]">
+                  VAPID Key স্ট্যাটাস: {firebaseMeta.vapidConfigured ? 'যুক্ত (VITE_FIREBASE_VAPID_KEY)' : 'অনির্ধারিত'} · নির্দিষ্ট টেস্ট অ্যাকাউন্ট বা সব সাবস্ক্রাইবারকে পুশ নোটিফিকেশন পাঠান।
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      const res = await requestAndGenerateFcmToken();
+                      if (res.token && auth?.currentUser?.uid) {
+                        await saveFcmTokenToFirestore(auth.currentUser.uid, res.token, 'bn').catch(() => {});
+                        if (authToken) {
+                          await fetch('/api/notifications/token', {
+                            method: 'POST',
+                            headers: {
+                              'Content-Type': 'application/json',
+                              Authorization: `Bearer ${authToken}`,
+                            },
+                            body: JSON.stringify({ token: res.token, platform: 'web', language: 'bn' }),
+                          }).catch(() => {});
+                        }
+                        setPushTargetUid(auth.currentUser.uid);
+                        setPushDispatchResult(`বর্তমান ব্রাউজার টোকেন সংরক্ষিত হয়েছে (UID: ${auth.currentUser.uid})।`);
+                      } else {
+                        setPushDispatchResult(`টোকেন তৈরি হয়নি: ${res.error || res.permission}`);
+                      }
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-xs font-semibold text-[#F5F2EB] cursor-pointer disabled:opacity-50"
+                >
+                  <Bell className="h-3.5 w-3.5 text-amber-300" />
+                  <span>এই ব্রাউজার রেজিস্টার করুন</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || !authToken}
+                  onClick={async () => {
+                    if (!authToken) return;
+                    setBusy(true);
+                    try {
+                      const resp = await fetch('/api/admin/notifications/tokens', {
+                        headers: { Authorization: `Bearer ${authToken}` },
+                      });
+                      const data = await resp.json();
+                      if (resp.ok) {
+                        setPushTokenSummary(Array.isArray(data.tokens) ? data.tokens : []);
+                        setPushDispatchResult(`মোট ${data.totalTokens || 0}টি রেজিস্টার্ড ডিভাইস টোকেন পাওয়া গেছে।`);
+                      } else {
+                        setPushDispatchResult(data.error || 'টোকেন তালিকা লোড করা যায়নি।');
+                      }
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-xs font-semibold text-[#D1C5C5] cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>সাবস্ক্রাইবার দেখুন</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div className="space-y-1">
+                <label className="text-[#A69E95] block">টেস্ট অ্যাকাউন্ট Email (ঐচ্ছিক)</label>
+                <input
+                  type="email"
+                  value={pushTargetEmail}
+                  onChange={(e) => setPushTargetEmail(e.target.value)}
+                  placeholder="testuser@example.com"
+                  className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/[0.1] text-[#F5F2EB]"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[#A69E95] block">অথবা User UID (ফাঁকা রাখলে সব ইউজার)</label>
+                <input
+                  type="text"
+                  value={pushTargetUid}
+                  onChange={(e) => setPushTargetUid(e.target.value)}
+                  placeholder="Firebase Auth UID"
+                  className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/[0.1] text-[#F5F2EB] font-mono"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[#A69E95] block">নোটিফিকেশন শিরোনাম (Title)</label>
+                <input
+                  type="text"
+                  value={pushTitle}
+                  onChange={(e) => setPushTitle(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/[0.1] text-[#F5F2EB]"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[#A69E95] block">লিংক পাথ (Link Path)</label>
+                <input
+                  type="text"
+                  value={pushLink}
+                  onChange={(e) => setPushLink(e.target.value)}
+                  placeholder="/stories"
+                  className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/[0.1] text-[#F5F2EB] font-mono"
+                />
+              </div>
+              <div className="sm:col-span-2 space-y-1">
+                <label className="text-[#A69E95] block">বার্তা (Message Body)</label>
+                <input
+                  type="text"
+                  value={pushBody}
+                  onChange={(e) => setPushBody(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/[0.1] text-[#F5F2EB]"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                disabled={busy || !authToken}
+                onClick={async () => {
+                  if (!authToken) return;
+                  setBusy(true);
+                  setPushDispatchResult(null);
+                  try {
+                    const resp = await fetch('/api/admin/notifications/send', {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${authToken}`,
+                      },
+                      body: JSON.stringify({
+                        title: pushTitle,
+                        body: pushBody,
+                        targetEmail: pushTargetEmail.trim() || undefined,
+                        targetUid: pushTargetUid.trim() || undefined,
+                        link: pushLink.trim() || '/',
+                      }),
+                    });
+                    const data = await resp.json();
+                    if (resp.ok) {
+                      setPushDispatchResult(
+                        `ফলাফল: টার্গেট ${data.targetCount}, সফল ${data.sentCount}, ব্যর্থ ${data.failureCount}${(data.warnings && data.warnings.length) ? ` (${data.warnings.join('; ')})` : ''}`,
+                      );
+                    } else {
+                      setPushDispatchResult(data.error || 'পুশ নোটিফিকেশন পাঠানো যায়নি।');
+                    }
+                  } catch {
+                    setPushDispatchResult('ব্যাকএন্ড সার্ভারের সাথে সংযোগ ব্যর্থ হয়েছে।');
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-[#DC2626] to-[#B91C1C] text-white text-xs font-semibold cursor-pointer shadow-md disabled:opacity-50"
+              >
+                <Send className="h-3.5 w-3.5" />
+                <span>Push Notification পাঠান (Firebase Admin)</span>
+              </button>
+              {pushDispatchResult && (
+                <span className="text-xs text-emerald-300">{pushDispatchResult}</span>
+              )}
+            </div>
+
+            {pushTokenSummary.length > 0 && (
+              <div className="p-3 rounded-xl bg-black/30 border border-white/[0.06] space-y-1.5 text-[11px] max-h-40 overflow-y-auto">
+                {pushTokenSummary.map((item) => (
+                  <div
+                    key={item.tokenId}
+                    className="flex flex-wrap items-center justify-between gap-2 text-[#D1C5C5] border-b border-white/[0.04] pb-1 last:border-b-0 last:pb-0"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setPushTargetUid(item.uid)}
+                      className="font-mono text-amber-300 hover:underline cursor-pointer"
+                    >
+                      UID: {item.uid}
+                    </button>
+                    <span className="font-mono text-[#8C847C]">{item.tokenPreview}</span>
+                    <span className="text-[#8C847C]">{item.platform}</span>
+                  </div>
+                ))}
               </div>
             )}
           </div>

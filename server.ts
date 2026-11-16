@@ -26,6 +26,11 @@ import {
   type VerifiedFirebaseToken,
 } from './server/firebaseAuth.ts';
 import {
+  createFcmNotificationService,
+  type MessagingAdapter,
+  type StoredFcmTokenRecord,
+} from './server/fcmNotifications.ts';
+import {
   deleteEditorFromFirestoreRest,
   deleteStoryFromFirestoreRest,
   fetchPublishedAdSettingsFromFirestoreRest,
@@ -96,6 +101,7 @@ interface PersistedState {
   pricingMigratedTo9?: boolean;
   adSettings?: AdSettings;
   adDraftSettings?: AdSettings;
+  fcmTokensByUser?: Record<string, StoredFcmTokenRecord[]>;
 }
 
 export interface GoppoAppOptions {
@@ -110,6 +116,7 @@ export interface GoppoAppOptions {
     webhookSecret?: string;
   };
   skipCloudHydration?: boolean;
+  messagingOverride?: MessagingAdapter;
 }
 
 export function createGoppoApp(options: GoppoAppOptions = {}) {
@@ -173,6 +180,7 @@ function createDefaultState(): PersistedState {
     progressByUser: {},
     adSettings: createDefaultAdSettings('published'),
     adDraftSettings: createDefaultAdSettings('draft'),
+    fcmTokensByUser: {},
   };
 }
 
@@ -257,6 +265,10 @@ function loadState(): PersistedState {
           parsed.adDraftSettings || parsed.adSettings,
           'draft',
         );
+        parsed.fcmTokensByUser =
+          parsed.fcmTokensByUser && typeof parsed.fcmTokensByUser === 'object'
+            ? parsed.fcmTokensByUser
+            : {};
         return parsed;
       }
     }
@@ -266,6 +278,7 @@ function loadState(): PersistedState {
   const fresh = createDefaultState();
   fresh.pricingMigratedTo9 = true;
   fresh.usedGatewayPaymentIds = [];
+  fresh.fcmTokensByUser = {};
   return fresh;
 }
 
@@ -315,7 +328,62 @@ interface ChunkUploadSession {
   bytesWritten: number;
   createdAt: number;
 }
+const UPLOAD_SESSION_TTL_MS = 30 * 60 * 1000;
+const MAX_UPLOAD_SESSIONS_PER_USER = 5;
+const MAX_TOTAL_UPLOAD_SESSIONS = 40;
 const uploadSessions = new Map<string, ChunkUploadSession>();
+
+function pruneExpiredUploadSessions(): void {
+  const now = Date.now();
+  for (const [id, sess] of uploadSessions.entries()) {
+    if (now - sess.createdAt > UPLOAD_SESSION_TTL_MS) {
+      uploadSessions.delete(id);
+      try {
+        fs.rmSync(sess.tempPath, { force: true });
+      } catch {
+        // Ignore cleanup failure on missing temp file
+      }
+    }
+  }
+}
+
+function saveStateBackup(reason: string): void {
+  try {
+    const backupDir = path.join(DATA_DIR, 'backups');
+    if (!fs.existsSync(backupDir)) {
+      fs.mkdirSync(backupDir, { recursive: true });
+    }
+    const safeReason = reason.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32) || 'snapshot';
+    const backupFile = path.join(backupDir, `catalog-${safeReason}-${Date.now()}.json`);
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify(
+        {
+          backedUpAt: new Date().toISOString(),
+          reason: safeReason,
+          stories: state.stories,
+          categoryToggles: state.categoryToggles,
+          nPassMonthlyPriceInr: state.nPassMonthlyPriceInr,
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+    const existing = fs
+      .readdirSync(backupDir)
+      .filter((f) => f.startsWith('catalog-') && f.endsWith('.json'))
+      .sort();
+    while (existing.length > 5) {
+      const oldest = existing.shift();
+      if (oldest) {
+        fs.rmSync(path.join(backupDir, oldest), { force: true });
+      }
+    }
+  } catch {
+    // Non-fatal in read-only environments
+  }
+}
 
 function saveState(): void {
   try {
@@ -332,9 +400,6 @@ function extractBearerToken(req: Request): string {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     return authHeader.slice(7).trim();
-  }
-  if (typeof req.query.token === 'string') {
-    return req.query.token.trim();
   }
   return '';
 }
@@ -515,14 +580,19 @@ function sanitizeStoriesForViewer(stories: StoryItem[], user: UserProfile | null
 
   return stories.map((story) => {
     const isFree = story.ticketPriceInr <= 0;
+    const isPublished = story.publicationStatus === 'published';
     const entitled = isStaff || isFree || userHasStoryAccess(user, story);
 
-    const signIfProtectedUpload = (rawUrl: string | undefined, epId: string): string | undefined => {
+    const signIfProtectedUpload = (
+      rawUrl: string | undefined,
+      epId: string,
+      forceSign = false,
+    ): string | undefined => {
       if (!rawUrl) return undefined;
       const clean = stripMediaTokenQuery(rawUrl);
       if (!clean) return undefined;
       const fn = extractUploadedFilenameFromUrl(clean);
-      if (fn && !isFree) {
+      if (fn && (forceSign || !isFree || !isPublished)) {
         const mt = createSignedMediaToken(
           MEDIA_SIGNING_SECRET,
           { fn, sid: story.id, eid: epId, uid: viewerUid },
@@ -546,6 +616,17 @@ function sanitizeStoriesForViewer(stories: StoryItem[], user: UserProfile | null
       };
     });
 
+    if (!isPublished && isStaff) {
+      return {
+        ...story,
+        coverArt: signIfProtectedUpload(story.coverArt, 'cover', true) || story.coverArt,
+        heroArt: signIfProtectedUpload(story.heroArt, 'hero', true) || story.heroArt,
+        trailerAudioUrl: signIfProtectedUpload(story.trailerAudioUrl, 'trailer', true),
+        trailerVideoUrl: signIfProtectedUpload(story.trailerVideoUrl, 'trailer', true),
+        episodes: sanitizedEpisodes,
+      };
+    }
+
     return {
       ...story,
       episodes: sanitizedEpisodes,
@@ -557,6 +638,7 @@ function isUploadFilePubliclyAccessible(fileName: string): {
   isPublicFree: boolean;
   isDraftOnly: boolean;
   owningStories: StoryItem[];
+  inferredTier: MediaTier;
 } {
   const targetUrl = `/api/uploads/${fileName}`;
   const manifest = mediaManifest[fileName];
@@ -568,7 +650,7 @@ function isUploadFilePubliclyAccessible(fileName: string): {
           stripMediaTokenQuery(ep.videoUrl) === targetUrl,
       ),
     );
-    return { isPublicFree: false, isDraftOnly: false, owningStories: owning };
+    return { isPublicFree: false, isDraftOnly: false, owningStories: owning, inferredTier: 'premium' };
   }
 
   let referencedInFreeOrTrailer = false;
@@ -588,9 +670,14 @@ function isUploadFilePubliclyAccessible(fileName: string): {
         stripMediaTokenQuery(ep.videoUrl) === targetUrl,
     );
 
-    if (isTrailerOrArt && s.publicationStatus === 'published') {
-      referencedInFreeOrTrailer = true;
-    } else if (inEpisode) {
+    if (isTrailerOrArt) {
+      if (s.publicationStatus === 'published') {
+        referencedInFreeOrTrailer = true;
+      } else {
+        referencedInDraftOnly = true;
+      }
+    }
+    if (inEpisode) {
       if (s.publicationStatus !== 'published') {
         referencedInDraftOnly = true;
       } else if (s.ticketPriceInr <= 0) {
@@ -601,13 +688,19 @@ function isUploadFilePubliclyAccessible(fileName: string): {
     }
   }
 
-  if (premiumOwning.length > 0 && !referencedInFreeOrTrailer) {
-    return { isPublicFree: false, isDraftOnly: false, owningStories: premiumOwning };
+  if (referencedInFreeOrTrailer) {
+    return { isPublicFree: true, isDraftOnly: false, owningStories: [], inferredTier: 'free' };
   }
-  if (referencedInDraftOnly && !referencedInFreeOrTrailer) {
-    return { isPublicFree: false, isDraftOnly: true, owningStories: [] };
+  if (premiumOwning.length > 0) {
+    return { isPublicFree: false, isDraftOnly: false, owningStories: premiumOwning, inferredTier: 'premium' };
   }
-  return { isPublicFree: true, isDraftOnly: false, owningStories: [] };
+  // Fail-closed: draft-only, orphaned, or unattached uploads are NEVER publicly readable without auth or signed ?mt= token
+  return {
+    isPublicFree: false,
+    isDraftOnly: referencedInDraftOnly ? true : true,
+    owningStories: [],
+    inferredTier: 'free',
+  };
 }
 
   saveState();
@@ -660,20 +753,38 @@ function isUploadFilePubliclyAccessible(fileName: string): {
     });
   }
 
+  const fcmService = createFcmNotificationService({
+    localTokensByUser: state.fcmTokensByUser || (state.fcmTokensByUser = {}),
+    saveLocalState: saveState,
+    findUidByEmail: async (emailLower: string) => {
+      const matchedUser = Object.values(state.users).find(
+        (u) => (u.email || '').trim().toLowerCase() === emailLower,
+      );
+      return matchedUser?.firebaseUid || matchedUser?.id || null;
+    },
+    messagingOverride: options.messagingOverride,
+  });
+
   const app = express();
   app.use((_req: Request, res: Response, next) => {
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
     next();
   });
-  app.use(
-    express.json({
-      limit: '50mb',
-      verify: (req, _res, buf) => {
-        (req as Request & { rawBody?: Buffer }).rawBody = buf;
-      },
-    }),
-  );
-  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+  const standardJsonParser = express.json({
+    limit: '2mb',
+    verify: (req, _res, buf) => {
+      (req as Request & { rawBody?: Buffer }).rawBody = buf;
+    },
+  });
+  const largeAdminJsonParser = express.json({ limit: '50mb' });
+  app.use((req: Request, res: Response, next) => {
+    if (req.path === '/api/admin/upload-media' || req.path === '/api/admin/import') {
+      largeAdminJsonParser(req, res, next);
+      return;
+    }
+    standardJsonParser(req, res, next);
+  });
+  app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
   // ---------------------------------------------------------------------------
   // PUBLIC & AUTHENTICATED BOOTSTRAP (Always returns stories sorted newest first)
@@ -1924,6 +2035,20 @@ function isUploadFilePubliclyAccessible(fileName: string): {
       return;
     }
 
+    pruneExpiredUploadSessions();
+    const userActiveSessions = Array.from(uploadSessions.values()).filter(
+      (s) => s.userId === user.id,
+    ).length;
+    if (
+      userActiveSessions >= MAX_UPLOAD_SESSIONS_PER_USER ||
+      uploadSessions.size >= MAX_TOTAL_UPLOAD_SESSIONS
+    ) {
+      res.status(429).json({
+        error: 'Too many concurrent upload sessions in progress. Please wait and retry.',
+      });
+      return;
+    }
+
     const accessTier: MediaTier =
       spec.kind === 'image' ? 'free' : rawTier === 'premium' ? 'premium' : 'free';
     const uploadId = crypto.randomBytes(16).toString('hex');
@@ -1958,9 +2083,10 @@ function isUploadFilePubliclyAccessible(fileName: string): {
         return;
       }
 
+      pruneExpiredUploadSessions();
       const session = uploadSessions.get(req.params.uploadId);
       if (!session || session.userId !== user.id) {
-        res.status(404).json({ error: 'Upload session not found.' });
+        res.status(404).json({ error: 'Upload session not found or expired.' });
         return;
       }
 
@@ -2246,6 +2372,7 @@ Respond with strictly valid JSON in this exact structure:
     const safeMime = manifest?.mimeType || specResult?.spec.mime || 'application/octet-stream';
 
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
     res.setHeader(
       'Cache-Control',
       accessInfo.isPublicFree ? 'public, max-age=86400' : 'private, no-store',
@@ -2258,8 +2385,17 @@ Respond with strictly valid JSON in this exact structure:
       return;
     }
 
+    const gcsCandidates: string[] = [];
     if (manifest?.gcsObjectPath) {
-      const gcsRes = await fetchFromGcsFallback(manifest.gcsObjectPath, req.headers.range);
+      gcsCandidates.push(manifest.gcsObjectPath);
+    } else if (specResult) {
+      gcsCandidates.push(`stories/${accessInfo.inferredTier}/${specResult.spec.folder}/${fileName}`);
+      const altTier = accessInfo.inferredTier === 'premium' ? 'free' : 'premium';
+      gcsCandidates.push(`stories/${altTier}/${specResult.spec.folder}/${fileName}`);
+    }
+
+    for (const candidateObj of gcsCandidates) {
+      const gcsRes = await fetchFromGcsFallback(candidateObj, req.headers.range);
       if (gcsRes) {
         res.status(gcsRes.status);
         res.setHeader('Content-Type', safeMime);
@@ -2308,10 +2444,10 @@ Respond with strictly valid JSON in this exact structure:
       return;
     }
 
+    const rawId = body.id && typeof body.id === 'string' ? body.id.trim() : '';
     const id =
-      body.id && typeof body.id === 'string'
-        ? body.id
-        : `${body.language}-${crypto.randomBytes(4).toString('hex')}`;
+      (rawId.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/^_+/, '').slice(0, 128)) ||
+      `${body.language === 'hi' ? 'hi' : 'bn'}-${crypto.randomBytes(4).toString('hex')}`;
 
     const accessPolicy: AccessPolicy =
       body.accessPolicy === 'ticket_only' || body.accessPolicy === 'npass_included'
@@ -2325,6 +2461,14 @@ Respond with strictly valid JSON in this exact structure:
       : Boolean(existingStory?.isFeaturedHero);
 
     const nowIso = new Date().toISOString();
+    const clampedPrice =
+      body.ticketPriceInr === 0
+        ? 0
+        : Math.min(50000, Math.max(1, Number(body.ticketPriceInr) || DEFAULT_TICKET_PRICE_INR));
+    const safeCollections =
+      Array.isArray(body.collections) && body.collections.length > 0
+        ? body.collections.filter((c) => typeof c === 'string' && c.length > 0).slice(0, 10)
+        : existingStory?.collections || ['new'];
 
     const newStory: StoryItem = {
       id,
@@ -2333,49 +2477,46 @@ Respond with strictly valid JSON in this exact structure:
         body.category === 'animation' || body.category === 'films'
           ? body.category
           : 'audio',
-      collections: ['new'],
+      collections: safeCollections as StoryItem['collections'],
       isFeaturedHero: desiredHero,
       updatedAt: nowIso,
-      title: body.title.trim(),
-      subtitle: body.subtitle?.trim() || '',
-      synopsis: body.synopsis?.trim() || '',
-      writer: body.writer?.trim() || 'Goppo Kahini Studio',
-      narrator: body.narrator?.trim() || 'Goppo Kahini Ensemble',
-      genre: body.genre.trim(),
-      coverArt: body.coverArt?.trim() || (body.language === 'hi' ? 'hi_cover_haveli' : 'bn_cover_salbon'),
-      heroArt: body.heroArt?.trim() || body.coverArt?.trim() || (body.language === 'hi' ? 'hi_hero_ghat' : 'bn_hero_zamindar'),
+      title: body.title.trim().slice(0, 200),
+      subtitle: (body.subtitle?.trim() || '').slice(0, 300),
+      synopsis: (body.synopsis?.trim() || '').slice(0, 3000),
+      writer: (body.writer?.trim() || 'Goppo Kahini Studio').slice(0, 120),
+      narrator: (body.narrator?.trim() || 'Goppo Kahini Ensemble').slice(0, 120),
+      genre: body.genre.trim().slice(0, 100),
+      coverArt: (body.coverArt?.trim() || (body.language === 'hi' ? 'hi_cover_haveli' : 'bn_cover_salbon')).slice(0, 500),
+      heroArt: (body.heroArt?.trim() || body.coverArt?.trim() || (body.language === 'hi' ? 'hi_hero_ghat' : 'bn_hero_zamindar')).slice(0, 500),
       mediaType:
         body.mediaType ||
         (body.category === 'animation' || body.category === 'films' ? 'video' : 'audio'),
-      trailerTitle: body.trailerTitle?.trim() || `Trailer — ${body.title.trim()}`,
-      trailerDurationLabel: body.trailerDurationLabel || '00:45',
-      trailerDurationSeconds: body.trailerDurationSeconds || 40,
-      trailerAudioKey: `${id}_trailer`,
+      trailerTitle: (body.trailerTitle?.trim() || `Trailer — ${body.title.trim()}`).slice(0, 220),
+      trailerDurationLabel: (body.trailerDurationLabel || '00:45').slice(0, 20),
+      trailerDurationSeconds: Math.min(36000, Math.max(0, Number(body.trailerDurationSeconds) || 40)),
+      trailerAudioKey: `${id}_trailer`.slice(0, 140),
       trailerAudioUrl: stripMediaTokenQuery(body.trailerAudioUrl),
       trailerVideoUrl: stripMediaTokenQuery(body.trailerVideoUrl),
-      totalDurationLabel: body.totalDurationLabel || '20m',
-      ticketPriceInr:
-        body.ticketPriceInr === 0
-          ? 0
-          : Math.max(1, Number(body.ticketPriceInr) || DEFAULT_TICKET_PRICE_INR),
+      totalDurationLabel: (body.totalDurationLabel || '20m').slice(0, 30),
+      ticketPriceInr: clampedPrice,
       accessPolicy,
       publicationStatus: body.publicationStatus === 'draft' ? 'draft' : 'published',
-      releaseYear: 2026,
+      releaseYear: Math.min(2100, Math.max(1900, Number(body.releaseYear) || 2026)),
       episodes:
         Array.isArray(body.episodes) && body.episodes.length > 0
-          ? body.episodes.map((ep, index) => ({
-              id: ep.id || `${id}-ep-${index + 1}`,
+          ? body.episodes.slice(0, 100).map((ep, index) => ({
+              id: (ep.id || `${id}-ep-${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128),
               number: index + 1,
-              title: ep.title || `Episode ${index + 1}`,
-              durationLabel: ep.durationLabel || '14:00',
-              durationSeconds: ep.durationSeconds || 75,
-              audioKey: ep.audioKey || `${id}_ep_${index + 1}`,
+              title: (ep.title || `Episode ${index + 1}`).slice(0, 200),
+              durationLabel: (ep.durationLabel || '14:00').slice(0, 20),
+              durationSeconds: Math.min(86400, Math.max(1, Number(ep.durationSeconds) || 75)),
+              audioKey: (ep.audioKey || `${id}_ep_${index + 1}`).slice(0, 140),
               audioUrl: stripMediaTokenQuery(ep.audioUrl),
               videoUrl: stripMediaTokenQuery(ep.videoUrl),
               mediaType:
                 ep.mediaType ||
                 (body.category === 'animation' || body.category === 'films' ? 'video' : 'audio'),
-              synopsis: ep.synopsis || '',
+              synopsis: (ep.synopsis || '').slice(0, 1000),
             }))
           : [
               {
@@ -2385,7 +2526,7 @@ Respond with strictly valid JSON in this exact structure:
                 durationLabel: '15:00',
                 durationSeconds: 75,
                 audioKey: `${id}_ep_1`,
-                synopsis: body.synopsis?.trim() || '',
+                synopsis: (body.synopsis?.trim() || '').slice(0, 1000),
               },
             ],
     };
@@ -2411,14 +2552,30 @@ Respond with strictly valid JSON in this exact structure:
     res.json({ stories: state.stories, categories: computeCategories() });
   });
 
-  // Delete story (Requires manage_stories)
+  // Delete story (Drafts: Admin or manage_stories Editor; Published stories: Owner/Admin ONLY)
   app.delete('/api/admin/stories/:id', async (req: Request, res: Response) => {
     const user = await resolveAuthenticatedUser(req);
     if (!hasStaffPermission(user, 'manage_stories')) {
       res.status(403).json({ error: 'Permission required: manage_stories.' });
       return;
     }
-    const storyId = req.params.id;
+    const storyId = (req.params.id || '').trim();
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(storyId)) {
+      res.status(400).json({ error: 'Invalid story ID.' });
+      return;
+    }
+    const targetStory = state.stories.find((s) => s.id === storyId);
+    if (!targetStory) {
+      res.status(404).json({ error: 'Story not found.' });
+      return;
+    }
+    if (targetStory.publicationStatus === 'published' && user?.role !== 'admin') {
+      res.status(403).json({
+        error: 'Only Owner/Administrator can permanently delete published stories. Unpublish to draft first.',
+      });
+      return;
+    }
+    saveStateBackup(`pre-delete-${storyId}`);
     state.stories = state.stories.filter((s) => s.id !== storyId);
     saveState();
     void deleteStoryFromFirestoreRest(storyId, extractBearerToken(req));
@@ -2461,7 +2618,7 @@ Respond with strictly valid JSON in this exact structure:
     });
   });
 
-  // Import catalog state from backup (OWNER / ADMIN ONLY)
+  // Import catalog state from backup (OWNER / ADMIN ONLY, validated non-empty + automatic pre-import backup)
   app.post('/api/admin/import', async (req: Request, res: Response) => {
     const user = await resolveAuthenticatedUser(req);
     if (!user || user.role !== 'admin') {
@@ -2469,14 +2626,138 @@ Respond with strictly valid JSON in this exact structure:
       return;
     }
     const importedStories = req.body?.stories;
-    if (Array.isArray(importedStories)) {
-      state.stories = sortStoriesNewestFirst(importedStories);
-      saveState();
+    if (!Array.isArray(importedStories) || importedStories.length === 0) {
+      res.status(400).json({ error: 'Import rejected: stories must be a non-empty array.' });
+      return;
     }
+    const allValid = importedStories.every(
+      (s: unknown) =>
+        Boolean(s) &&
+        typeof s === 'object' &&
+        typeof (s as StoryItem).id === 'string' &&
+        /^[a-zA-Z0-9_-]{1,128}$/.test((s as StoryItem).id) &&
+        typeof (s as StoryItem).title === 'string' &&
+        (s as StoryItem).title.trim().length > 0 &&
+        ((s as StoryItem).language === 'bn' || (s as StoryItem).language === 'hi') &&
+        Array.isArray((s as StoryItem).episodes),
+    );
+    if (!allValid) {
+      res.status(400).json({
+        error: 'Import rejected: one or more story entries failed schema validation.',
+      });
+      return;
+    }
+
+    saveStateBackup('pre-import');
+    state.stories = sortStoriesNewestFirst(importedStories as StoryItem[]);
+    saveState();
     res.json({
       stories: state.stories,
       categories: computeCategories(),
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // WEB PUSH / FIREBASE CLOUD MESSAGING (FCM) ROUTES
+  // ---------------------------------------------------------------------------
+  app.post('/api/notifications/token', async (req: Request, res: Response) => {
+    const user = await resolveAuthenticatedUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required to register notification token.' });
+      return;
+    }
+
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    if (token.length < 10 || token.length > 512) {
+      res.status(400).json({ error: 'Invalid FCM registration token.' });
+      return;
+    }
+
+    const rawPlatform = req.body?.platform;
+    const platform: 'web' | 'android' | 'ios' =
+      rawPlatform === 'android' || rawPlatform === 'ios' ? rawPlatform : 'web';
+    const language: Language = req.body?.language === 'hi' ? 'hi' : 'bn';
+    const targetUid = (user.firebaseUid || user.id).trim();
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetUid)) {
+      res.status(400).json({ error: 'Invalid user identifier.' });
+      return;
+    }
+
+    const saved = await fcmService.registerUserToken({
+      uid: targetUid,
+      token,
+      platform,
+      language,
+      userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined,
+    });
+
+    res.json({
+      ok: true,
+      uid: targetUid,
+      tokenId: saved.tokenId,
+      firestoreSynced: saved.firestoreSynced,
+    });
+  });
+
+  app.delete('/api/notifications/token', async (req: Request, res: Response) => {
+    const user = await resolveAuthenticatedUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    if (token.length < 10 || token.length > 512) {
+      res.status(400).json({ error: 'Invalid FCM registration token.' });
+      return;
+    }
+    const targetUid = (user.firebaseUid || user.id).trim();
+    await fcmService.unregisterUserToken(targetUid, token);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/admin/notifications/tokens', async (req: Request, res: Response) => {
+    const user = await resolveAuthenticatedUser(req);
+    if (!user || user.role !== 'admin') {
+      res.status(403).json({ error: 'Owner/Administrator role required.' });
+      return;
+    }
+    const tokens = await fcmService.listTokenSummaries();
+    res.json({
+      totalTokens: tokens.length,
+      tokens,
+    });
+  });
+
+  app.post('/api/admin/notifications/send', async (req: Request, res: Response) => {
+    const user = await resolveAuthenticatedUser(req);
+    if (!user || user.role !== 'admin') {
+      res.status(403).json({ error: 'Owner/Administrator role required to send push notifications.' });
+      return;
+    }
+
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+    const body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+    if (!title || !body) {
+      res.status(400).json({ error: 'Both notification title and body are required.' });
+      return;
+    }
+
+    try {
+      const result = await fcmService.sendPushNotification({
+        title,
+        body,
+        targetUid: typeof req.body?.targetUid === 'string' ? req.body.targetUid : undefined,
+        targetEmail: typeof req.body?.targetEmail === 'string' ? req.body.targetEmail : undefined,
+        targetToken: typeof req.body?.targetToken === 'string' ? req.body.targetToken : undefined,
+        link: typeof req.body?.link === 'string' ? req.body.link : '/',
+        imageUrl: typeof req.body?.imageUrl === 'string' ? req.body.imageUrl : undefined,
+        storyId: typeof req.body?.storyId === 'string' ? req.body.storyId : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to send push notification.';
+      res.status(502).json({ error: msg });
+    }
   });
 
   // ---------------------------------------------------------------------------

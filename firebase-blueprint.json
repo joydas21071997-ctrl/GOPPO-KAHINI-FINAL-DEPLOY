@@ -210,6 +210,45 @@
       },
       "required": ["storyId", "episodeId", "isTrailer", "positionSeconds", "durationSeconds", "updatedAt"]
     },
+    "UserFcmToken": {
+      "title": "UserFcmToken",
+      "description": "Web Push FCM registration token bound strictly to an authenticated verified listener account.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "token": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 512
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["web", "android", "ios"]
+        },
+        "language": {
+          "type": "string",
+          "enum": ["bn", "hi"]
+        },
+        "userAgent": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "token", "platform", "language", "createdAt", "updatedAt"]
+    },
     "StoryCatalogItem": {
       "title": "StoryCatalogItem",
       "description": "Published or draft bilingual story, animation, or short film catalog item.",
@@ -541,6 +580,10 @@
     "/users/{userId}/progress/{progressId}": {
       "schema": { "$ref": "#/entities/UserProgress" },
       "description": "Playback progress tracking per user and episode."
+    },
+    "/users/{userId}/fcmTokens/{tokenId}": {
+      "schema": { "$ref": "#/entities/UserFcmToken" },
+      "description": "Web Push FCM registration tokens linked to user account."
     },
     "/stories/{storyId}": {
       "schema": { "$ref": "#/entities/StoryCatalogItem" },

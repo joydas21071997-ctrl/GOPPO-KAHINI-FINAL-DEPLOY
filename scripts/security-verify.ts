@@ -952,6 +952,402 @@ async function runTests() {
     },
   );
 
+  // =========================================================================
+  // SUITE 14: Fail-Closed Upload Serving, Query Token Rejection, CSP Sandbox
+  // =========================================================================
+  await withServer(
+    {
+      isProductionOverride: true,
+      allowSandboxOverride: false,
+      paymentGatewayOverride: { enabled: false },
+    },
+    async (baseUrl) => {
+      await fetch(`${baseUrl}/api/auth/firebase`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tok.owner.jwt' },
+      });
+      await fetch(`${baseUrl}/api/auth/firebase`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tok.alice.jwt' },
+      });
+
+      // Query-string ?token= MUST NOT authenticate bearer requests
+      const queryTokRes = await fetch(`${baseUrl}/api/admin/export?token=tok.owner.jwt`);
+      assert.equal(queryTokRes.status, 403);
+
+      // Unattached staff upload (not yet attached to a published free story) MUST fail closed (401/403)
+      const upPng = await fetch(`${baseUrl}/api/admin/upload-media`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer tok.owner.jwt',
+        },
+        body: JSON.stringify({
+          fileData: makeMinimalPngBuffer().toString('base64'),
+          fileName: 'unattached_cover.png',
+          mediaType: 'image',
+          accessTier: 'free',
+        }),
+      });
+      assert.equal(upPng.status, 200);
+      const unattachedData = await upPng.json();
+
+      const unauthUnattached = await fetch(`${baseUrl}${unattachedData.url}`);
+      assert.equal(unauthUnattached.status, 401);
+
+      const listenerUnattached = await fetch(`${baseUrl}${unattachedData.url}`, {
+        headers: { Authorization: 'Bearer tok.alice.jwt' },
+      });
+      assert.equal(listenerUnattached.status, 403);
+
+      // Staff preview via signed previewUrl (?mt=) succeeds with CSP sandbox header
+      const staffPreview = await fetch(`${baseUrl}${unattachedData.previewUrl}`);
+      assert.equal(staffPreview.status, 200);
+      assert.equal(
+        staffPreview.headers.get('content-security-policy'),
+        "default-src 'none'; sandbox",
+      );
+
+      // Attach to a DRAFT story: still blocked for unauthenticated/regular users
+      await fetch(`${baseUrl}/api/admin/stories`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer tok.owner.jwt',
+        },
+        body: JSON.stringify({
+          id: 'bn-draft-media-test',
+          language: 'bn',
+          category: 'audio',
+          title: 'Draft Story Media Guard',
+          genre: 'Mystery',
+          coverArt: unattachedData.url,
+          ticketPriceInr: 0,
+          publicationStatus: 'draft',
+          episodes: [{ id: 'ep1', title: 'Ep 1', durationLabel: '05:00' }],
+        }),
+      });
+      const guestDraftArt = await fetch(`${baseUrl}${unattachedData.url}`);
+      assert.equal(guestDraftArt.status, 401);
+
+      // Once PUBLISHED, coverArt / free story media becomes publicly accessible
+      await fetch(`${baseUrl}/api/admin/stories`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer tok.owner.jwt',
+        },
+        body: JSON.stringify({
+          id: 'bn-draft-media-test',
+          language: 'bn',
+          category: 'audio',
+          title: 'Draft Story Media Guard',
+          genre: 'Mystery',
+          coverArt: unattachedData.url,
+          ticketPriceInr: 0,
+          publicationStatus: 'published',
+          episodes: [{ id: 'ep1', title: 'Ep 1', durationLabel: '05:00' }],
+        }),
+      });
+      const guestPubArt = await fetch(`${baseUrl}${unattachedData.url}`);
+      assert.equal(guestPubArt.status, 200);
+      record('14. Fail-closed /api/uploads/:fileName, ?token= rejection, and CSP sandbox header');
+    },
+  );
+
+  // =========================================================================
+  // SUITE 15: Data Protection (Delete RBAC, Import Guards, Backup Snapshots, Rules)
+  // =========================================================================
+  await withServer(
+    {
+      isProductionOverride: true,
+      allowSandboxOverride: false,
+      paymentGatewayOverride: { enabled: false },
+    },
+    async (baseUrl, dataDir) => {
+      await fetch(`${baseUrl}/api/auth/firebase`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tok.owner.jwt' },
+      });
+      await fetch(`${baseUrl}/api/admin/editors`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer tok.owner.jwt',
+        },
+        body: JSON.stringify({
+          email: 'storyeditor@goppokahini.in',
+          name: 'Story Only Editor',
+          uid: 'uid_editor_story',
+          permissions: ['manage_stories'],
+        }),
+      });
+
+      // Create one draft and one published story
+      await fetch(`${baseUrl}/api/admin/stories`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer tok.editorstory.jwt',
+        },
+        body: JSON.stringify({
+          id: 'bn-ed-draft',
+          language: 'bn',
+          category: 'audio',
+          title: 'Editor Draft',
+          genre: 'Drama',
+          publicationStatus: 'draft',
+          episodes: [{ id: 'd1', title: 'Ep 1', durationLabel: '05:00' }],
+        }),
+      });
+      await fetch(`${baseUrl}/api/admin/stories`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer tok.owner.jwt',
+        },
+        body: JSON.stringify({
+          id: 'bn-pub-protected',
+          language: 'bn',
+          category: 'audio',
+          title: 'Protected Live Story',
+          genre: 'Mystery',
+          publicationStatus: 'published',
+          episodes: [{ id: 'p1', title: 'Ep 1', durationLabel: '10:00' }],
+        }),
+      });
+
+      // Editor CANNOT permanently delete a published story (403)
+      const edDelPub = await fetch(`${baseUrl}/api/admin/stories/bn-pub-protected`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer tok.editorstory.jwt' },
+      });
+      assert.equal(edDelPub.status, 403);
+
+      // Editor CAN delete their draft story (200)
+      const edDelDraft = await fetch(`${baseUrl}/api/admin/stories/bn-ed-draft`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer tok.editorstory.jwt' },
+      });
+      assert.equal(edDelDraft.status, 200);
+
+      // Owner CAN delete published story & backup snapshot is persisted
+      const ownerDelPub = await fetch(`${baseUrl}/api/admin/stories/bn-pub-protected`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer tok.owner.jwt' },
+      });
+      assert.equal(ownerDelPub.status, 200);
+      const backupsDir = path.join(dataDir, 'backups');
+      assert.ok(fs.existsSync(backupsDir) && fs.readdirSync(backupsDir).length >= 1);
+
+      // /api/admin/import rejects empty array & malformed entries
+      const emptyImport = await fetch(`${baseUrl}/api/admin/import`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer tok.owner.jwt',
+        },
+        body: JSON.stringify({ stories: [] }),
+      });
+      assert.equal(emptyImport.status, 400);
+
+      const badImport = await fetch(`${baseUrl}/api/admin/import`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer tok.owner.jwt',
+        },
+        body: JSON.stringify({ stories: [{ id: '../evil', title: '' }] }),
+      });
+      assert.equal(badImport.status, 400);
+
+      // Static verification of hardened firestore.rules constraints
+      const rulesText = fs.readFileSync(path.join(process.cwd(), 'firestore.rules'), 'utf8');
+      assert.ok(rulesText.includes("docId == 'info'"));
+      assert.ok(rulesText.includes('data.email == request.auth.token.email'));
+      assert.ok(rulesText.includes("hasEditorPermission('manage_hero')"));
+      assert.ok(rulesText.includes("existing().publicationStatus == 'draft'"));
+      record('15. Data protection (Editor delete guard, import validation, pre-mutation backups, rules)');
+    },
+  );
+
+  // =========================================================================
+  // SUITE 16: Web Push (VAPID, FCM Token Persistence, Firebase Admin Dispatch)
+  // =========================================================================
+  {
+    const capturedMulticasts: Array<{ tokens: string[]; title?: string; body?: string; link?: string }> = [];
+    let forceInvalidToken = false;
+
+    await withServer(
+      {
+        isProductionOverride: true,
+        allowSandboxOverride: false,
+        paymentGatewayOverride: { enabled: false },
+        messagingOverride: {
+          async sendEachForMulticast(msg) {
+            capturedMulticasts.push({
+              tokens: [...msg.tokens],
+              title: msg.notification?.title,
+              body: msg.notification?.body,
+              link: msg.webpush?.fcmOptions?.link,
+            });
+            if (forceInvalidToken) {
+              return {
+                successCount: 0,
+                failureCount: msg.tokens.length,
+                responses: msg.tokens.map(() => ({
+                  success: false,
+                  error: {
+                    code: 'messaging/registration-token-not-registered',
+                    message: 'Requested entity was not found.',
+                    toJSON: () => ({}),
+                  },
+                })),
+              };
+            }
+            return {
+              successCount: msg.tokens.length,
+              failureCount: 0,
+              responses: msg.tokens.map((_, idx) => ({
+                success: true,
+                messageId: `projects/goppo-kahini/messages/test_msg_${idx}`,
+              })),
+            };
+          },
+        },
+      },
+      async (baseUrl) => {
+        // Unauthenticated cannot register or send notifications
+        const unauthReg = await fetch(`${baseUrl}/api/notifications/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: 'fcm_unauth_token_1234567890' }),
+        });
+        assert.equal(unauthReg.status, 401);
+
+        // Authenticate Test Account (Alice) and register FCM token
+        const aliceAuth = await fetch(`${baseUrl}/api/auth/firebase`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer tok.alice.jwt' },
+        });
+        assert.equal(aliceAuth.status, 200);
+
+        const testDeviceToken = 'cX7_test_fcm_token:APA91bGoppoKahiniTestAccountToken1234567890';
+        const aliceReg = await fetch(`${baseUrl}/api/notifications/token`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer tok.alice.jwt',
+          },
+          body: JSON.stringify({ token: testDeviceToken, platform: 'web', language: 'bn' }),
+        });
+        assert.equal(aliceReg.status, 200);
+        const aliceRegData = (await aliceReg.json()) as { ok: boolean; uid: string; tokenId: string };
+        assert.equal(aliceRegData.ok, true);
+        assert.equal(aliceRegData.uid, 'uid_alice_001');
+        assert.match(aliceRegData.tokenId, /^fcm_[a-zA-Z0-9_-]{1,120}$/);
+
+        // Regular listener CANNOT read token summaries or send notifications
+        const aliceList = await fetch(`${baseUrl}/api/admin/notifications/tokens`, {
+          headers: { Authorization: 'Bearer tok.alice.jwt' },
+        });
+        assert.equal(aliceList.status, 403);
+
+        const aliceSend = await fetch(`${baseUrl}/api/admin/notifications/send`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer tok.alice.jwt',
+          },
+          body: JSON.stringify({ title: 'Hack', body: 'Spam' }),
+        });
+        assert.equal(aliceSend.status, 403);
+
+        // Owner/Admin inspects masked token summaries & sends push to Test Account by email
+        const adminList = await fetch(`${baseUrl}/api/admin/notifications/tokens`, {
+          headers: { Authorization: 'Bearer tok.owner.jwt' },
+        });
+        assert.equal(adminList.status, 200);
+        const listData = (await adminList.json()) as {
+          totalTokens: number;
+          tokens: Array<{ uid: string; tokenPreview: string }>;
+        };
+        assert.equal(listData.totalTokens, 1);
+        assert.equal(listData.tokens[0].uid, 'uid_alice_001');
+        assert.ok(!listData.tokens[0].tokenPreview.includes('APA91bGoppoKahiniTestAccount'));
+
+        const sendRes = await fetch(`${baseUrl}/api/admin/notifications/send`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer tok.owner.jwt',
+          },
+          body: JSON.stringify({
+            targetEmail: 'alice@example.com',
+            title: 'টেস্ট গল্প আপডেট',
+            body: 'নতুন অডিও পর্ব প্রকাশিত হয়েছে।',
+            link: '/stories',
+          }),
+        });
+        assert.equal(sendRes.status, 200);
+        const sendData = (await sendRes.json()) as {
+          targetCount: number;
+          sentCount: number;
+          failureCount: number;
+        };
+        assert.equal(sendData.targetCount, 1);
+        assert.equal(sendData.sentCount, 1);
+        assert.equal(sendData.failureCount, 0);
+        assert.equal(capturedMulticasts.length, 1);
+        assert.deepEqual(capturedMulticasts[0].tokens, [testDeviceToken]);
+        assert.equal(capturedMulticasts[0].link, '/stories');
+
+        // Permanently unregistered FCM tokens are pruned automatically
+        forceInvalidToken = true;
+        const staleSendRes = await fetch(`${baseUrl}/api/admin/notifications/send`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer tok.owner.jwt',
+          },
+          body: JSON.stringify({
+            targetUid: 'uid_alice_001',
+            title: 'Cleanup Check',
+            body: 'Testing unregistered token removal',
+          }),
+        });
+        assert.equal(staleSendRes.status, 200);
+        const staleData = (await staleSendRes.json()) as {
+          failureCount: number;
+          removedInvalidTokens: number;
+        };
+        assert.equal(staleData.failureCount, 1);
+        assert.equal(staleData.removedInvalidTokens, 1);
+
+        const afterCleanupList = await fetch(`${baseUrl}/api/admin/notifications/tokens`, {
+          headers: { Authorization: 'Bearer tok.owner.jwt' },
+        });
+        const afterData = (await afterCleanupList.json()) as { totalTokens: number };
+        assert.equal(afterData.totalTokens, 0);
+
+        // Verify .env, .env.example, firebase-messaging-sw.js, and firestore.rules
+        const envExample = fs.readFileSync(path.join(process.cwd(), '.env.example'), 'utf8');
+        assert.ok(envExample.includes('VITE_FIREBASE_VAPID_KEY='));
+        const envLocal = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf8');
+        assert.ok(envLocal.includes('VITE_FIREBASE_VAPID_KEY='));
+        const swCode = fs.readFileSync(
+          path.join(process.cwd(), 'public', 'firebase-messaging-sw.js'),
+          'utf8',
+        );
+        assert.ok(swCode.includes("addEventListener('push'") && swCode.includes("addEventListener('notificationclick'"));
+        const rulesText = fs.readFileSync(path.join(process.cwd(), 'firestore.rules'), 'utf8');
+        assert.ok(rulesText.includes('match /fcmTokens/{tokenId}'));
+
+        record('16. Web Push FCM (VAPID env, token registration, Admin send to test account, stale pruning)');
+      },
+    );
+  }
+
   for (const line of results) {
     console.log(line);
   }

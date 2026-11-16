@@ -1230,7 +1230,20 @@ export default function App() {
       )}
 
       {/* Interactive Notification Permission Modal */}
-      <NotificationPermissionModal />
+      <NotificationPermissionModal
+        language={language}
+        user={user}
+        authToken={authToken}
+        onNavigateUrl={(targetPath) => {
+          const [pathname, searchPart] = targetPath.split('?');
+          const parsed = parseLocationToRoute(
+            pathname || '/',
+            searchPart ? `?${searchPart}` : '',
+            storiesRef.current,
+          );
+          navigateTo(parsed);
+        }}
+      />
       <OfflineIndicator />
 
       <Header
