@@ -23,6 +23,12 @@ import {
   type Messaging,
   type MessagePayload,
 } from 'firebase/messaging';
+import {
+  getAnalytics,
+  isSupported as isAnalyticsSupported,
+  logEvent,
+  type Analytics,
+} from 'firebase/analytics';
 
 interface FirebaseClientConfig {
   projectId?: string;
@@ -32,6 +38,7 @@ interface FirebaseClientConfig {
   firestoreDatabaseId?: string;
   storageBucket?: string;
   messagingSenderId?: string;
+  measurementId?: string;
   vapidKey?: string;
 }
 
@@ -57,6 +64,7 @@ let db: Firestore | null = null;
 let auth: Auth | null = null;
 let storage: FirebaseStorage | null = null;
 let googleProvider: GoogleAuthProvider | null = null;
+let analytics: Analytics | null = null;
 
 if (isFirebaseConfigured) {
   app = initializeApp(firebaseConfig);
@@ -82,13 +90,47 @@ export const FIREBASE_VAPID_KEY = (
   ''
 ).trim();
 
-export { app, db, auth, storage, googleProvider };
+export const FIREBASE_MEASUREMENT_ID = (
+  import.meta.env.VITE_GA_MEASUREMENT_ID ||
+  firebaseConfig.measurementId ||
+  ''
+).trim();
+
+if (typeof window !== 'undefined' && isFirebaseConfigured && app && FIREBASE_MEASUREMENT_ID) {
+  void isAnalyticsSupported()
+    .then((supported) => {
+      if (supported && app) {
+        analytics = getAnalytics(app);
+      }
+    })
+    .catch(() => {});
+}
+
+export { app, db, auth, storage, googleProvider, analytics };
+
+export function logAnalyticsCustomEvent(
+  eventName: string,
+  eventParams?: Record<string, unknown>,
+) {
+  if (typeof window !== 'undefined') {
+    const w = window as unknown as { gtag?: (...args: unknown[]) => void };
+    if (typeof w.gtag === 'function') {
+      w.gtag('event', eventName, eventParams);
+    }
+    if (analytics) {
+      try {
+        logEvent(analytics, eventName, eventParams);
+      } catch {}
+    }
+  }
+}
 
 export function getFirebasePublicMeta() {
   return {
     configured: isFirebaseConfigured,
     storageConfigured: isFirebaseStorageConfigured,
     vapidConfigured: Boolean(FIREBASE_VAPID_KEY),
+    measurementId: FIREBASE_MEASUREMENT_ID,
     projectId: firebaseConfig.projectId || '',
     databaseId: firebaseConfig.firestoreDatabaseId || '',
     authDomain: firebaseConfig.authDomain || '',

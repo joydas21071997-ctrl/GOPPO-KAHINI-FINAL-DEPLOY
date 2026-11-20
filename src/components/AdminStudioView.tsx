@@ -3880,7 +3880,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
             </span>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] space-y-1.5">
               <span className="text-xs text-[#A69E95]">Firebase Authentication</span>
               <p className="font-mono text-sm font-bold text-emerald-400">Google + Staff RBAC সক্রিয়</p>
@@ -3906,6 +3906,19 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
               </p>
               <p className="text-[11px] text-[#9E968F]">
                 SDK যুক্ত আছে (অডিও, ভিডিও, পোস্টার সরাসরি বাকেটে আপলোড হবে; বাকেট তৈরির আগে সার্ভার ফলব্যাক চালু আছে)
+              </p>
+            </div>
+
+            <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] space-y-1.5">
+              <span className="text-xs text-[#A69E95]">Google Analytics (GA4)</span>
+              <p className="font-mono text-sm font-bold text-cyan-400">
+                {firebaseMeta.measurementId ? 'সক্রিয় ও সংযুক্ত' : 'অসংযুক্ত'}
+              </p>
+              <p className="text-[11px] text-[#7D7670] font-mono truncate">
+                ID: {firebaseMeta.measurementId || 'অনুপস্থিত'}
+              </p>
+              <p className="text-[11px] text-emerald-300">
+                রিয়েলটাইম ভিজিটর ট্র্যাকিং ও অডিয়েন্স অ্যানালিটিক্স লাইভ
               </p>
             </div>
           </div>
